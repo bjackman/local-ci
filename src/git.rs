@@ -1,10 +1,18 @@
 use anyhow::{anyhow, Context};
+use cancellation_token::{CancelCallback, CancellationToken};
+use crossbeam_channel;
+use inotify::{Inotify, WatchMask};
+use nix::unistd;
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::{collections, process, slice};
+
+use crate::process::CommandExt;
 
 // This module contains horribly manual git logic. This is manual for two main reasons:
 // - We need to be able to get notified of changes to ranges, this is not something that git
@@ -56,6 +64,101 @@ impl Repo {
             git_dir: PathBuf::from(git_path),
         })
     }
+
+    fn git(&self) -> process::Command {
+        let mut cmd = process::Command::new("git");
+        cmd.arg("-C").arg(&self.git_dir);
+        cmd
+    }
+
+    // Returns true if the input is the hash of an existing commit.
+    fn commit_exists(&self, ct: CancellationToken, rev: &RevSpec) -> anyhow::Result<bool> {
+        let output = self.git().args(["cat-file", "commit"]).output_ct(&ct)?;
+        let code = output
+            .status
+            .code()
+            .ok_or(anyhow!("git cat-file terminated by signal"))?;
+        Ok(code == 0)
+    }
+
+    fn rev_list(&self, ct: CancellationToken, range: &RangeSpec) -> anyhow::Result<Vec<RevSpec>> {
+        let output = self
+            .git()
+            .arg("rev-list")
+            .args(range.spec())
+            .output_ok(&ct)?;
+        Ok(OsStr::from_bytes(&output.stdout)
+            .split(b'\n')
+            .iter()
+            .map(|s| s.to_os_string())
+            .collect())
+    }
+
+    /// Run until the token is cancelled. Immediately, and whenever it changes, sends the set of
+    /// revisions described by the range spec down the channel. If any aspect of the range spec is
+    /// invalid in this repo, it is treated as describing an empty range. This doesn't support Git's
+    /// full set of revision specifications, only ranges described using commit hashes and symbolic
+    /// refs.
+    pub fn watch_range(
+        &self,
+        ct: CancellationToken,
+        range: &RangeSpec,
+        tx: crossbeam_channel::Sender<Vec<RevSpec>>,
+    ) -> anyhow::Result<()> {
+        // We use inotify directly because a) this code anyway doesn't work on Windows and b) the
+        // generic "notify" crate seems under-specified, you can't seem to mask off the events you
+        // don't care about.
+        let mut inotify = Inotify::init().context("inotify init")?;
+        let mut watches = inotify.watches();
+
+        for rev in range.include.iter().chain(range.exclude.iter()) {
+            // See gitrevisions(7).
+            let special_refs = collections::HashSet::from(
+                [
+                    "HEAD",
+                    "FETCH_HEAD",
+                    "ORIG_HEAD",
+                    "MERGE_HEAD",
+                    "CHERRY_PICK_HEAD",
+                ]
+                .map(OsString::from),
+            );
+
+            // Note we assume the files always get created/deleted and not renamed.
+            // (Or, maybe that just works too, not sure about the details of inotify).
+            let file_mask = WatchMask::CREATE | WatchMask::MODIFY | WatchMask::DELETE_SELF;
+
+            if special_refs.contains(rev) {
+                watches.add(self.git_dir.join(rev), file_mask)?;
+                continue;
+            }
+
+            for ref_dir_rel in ["refs", "refs/tags", "refs/heads"].map(Path::new) {
+                watches.add(self.git_dir.join(ref_dir_rel).join(rev), file_mask)?;
+            }
+
+            // TODO: Remote branches. I think the way to do this is just to watch the whole remotes
+            // directory. However, when doing that, we may want to buffer updates. In fact, maybe
+            // buffering updates would be a general solution, and we should just watch the whole
+            // .git tree?
+        }
+
+        // Terrible hack (?) to shut down the inotify reader from the cancelling thread.
+        let fd = inotify.as_raw_fd();
+        ct.register(CancelCallback::FnOnce(Box::new(move || {
+            unistd::close(fd).expect("shutting down inotify");
+        })));
+
+        let mut evt_buf = [0; 4096];
+        loop {
+            let err = inotify.read_events_blocking(&mut evt_buf);
+            if ct.is_canceled() {
+                return Ok(());
+            }
+            err?;
+            tx.send(self.rev_list(ct, range)?);
+        }
+    }
 }
 
 type RevSpec = OsString;
@@ -63,6 +166,7 @@ type RevSpec = OsString;
 #[derive(PartialEq, Debug)]
 /// Represents a git revision range specification. Note that just becuase the spec could be parsed,
 /// doesn't mean that this is actually a valid range in any given repository.
+/// The symmetric difference syntax (using "...") isn't supported.
 pub struct RangeSpec {
     include: Vec<RevSpec>,
     exclude: Vec<RevSpec>,

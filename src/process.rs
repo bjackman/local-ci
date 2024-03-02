@@ -21,7 +21,7 @@ pub trait CommandExt {
     // This is a convenience hack, somewhat like
     // std::process::ExitStatus::exit_ok, but it's more informative. Arguably we
     // should have a ExitStatusExt for that rather than just squashing it into CommandExt.
-    fn output_ok(&mut self, ct: &CancellationToken) -> anyhow::Result<()>;
+    fn output_ok(&mut self, ct: &CancellationToken) -> anyhow::Result<process::Output>;
 }
 
 // cancellation_token::Canceled doesn't implement std::errorr::Error so we can't put it into an
@@ -80,7 +80,7 @@ impl CommandExt for process::Command {
         return Ok(output);
     }
 
-    fn output_ok(&mut self, ct: &CancellationToken) -> anyhow::Result<()> {
+    fn output_ok(&mut self, ct: &CancellationToken) -> anyhow::Result<process::Output> {
         let output = self.output_ct(ct)?;
         match output.status.code() {
             None => Err(anyhow!(
