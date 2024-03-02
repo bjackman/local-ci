@@ -58,6 +58,53 @@ impl Repo {
     }
 }
 
+#[derive(PartialEq, Debug)]
+/// Represents a git revision range specification. Note that just becuase the spec could be parsed,
+/// doesn't mean that this is actually a valid range in any given repository.
+pub struct RangeSpec {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+impl RangeSpec {
+    fn parse(s: &str) -> anyhow::Result<Self> {
+        let mut include = vec![];
+        let mut exclude = vec![];
+
+        for part in s.split(" ") {
+            if part.is_empty() {
+                continue;
+            }
+
+            // This could be implemented fairly easily, it just doesn't seem very useful.
+            if part.contains("...") {
+                return Err(anyhow!(
+                    "rev spec {:?} - symmetric difference ranges not supported. \
+                        Did you mean '..' instead of '...'? See gitrevisions(7)",
+                    part
+                ));
+            }
+
+            if let [from, to] = part.splitn(2, "..").collect::<Vec<_>>()[..] {
+                if from.is_empty() || to.is_empty() {
+                    return Err(anyhow!("empty revision in range {:?}", part));
+                }
+
+                include.push(to.to_string());
+                exclude.push(from.to_string());
+                continue;
+            }
+
+            match part.strip_prefix("^") {
+                None => include.push(part.to_string()),
+                Some(suffix) => exclude.push(suffix.to_string()),
+            };
+        }
+
+        Ok(RangeSpec { include, exclude })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +175,77 @@ mod tests {
             .expect("couldn't setup git worktree");
         let repo = Repo::open(worktree.path().to_path_buf()).expect("failed to open repo");
         assert_eq!(repo.git_dir, tmp_dir.path().join(".git"));
+    }
+
+    #[test]
+    fn test_revspec_parse() {
+        for (string, want) in [
+            (
+                "foo",
+                RangeSpec {
+                    include: ["foo"].map(String::from).to_vec(),
+                    exclude: vec![],
+                },
+            ),
+            (
+                "foo bar",
+                RangeSpec {
+                    include: ["foo", "bar"].map(String::from).to_vec(),
+                    exclude: vec![],
+                },
+            ),
+            (
+                "foo ^bar ^baz",
+                RangeSpec {
+                    include: ["foo"].map(String::from).to_vec(),
+                    exclude: ["bar", "baz"].map(String::from).to_vec(),
+                },
+            ),
+            (
+                "foo..bar",
+                RangeSpec {
+                    include: ["bar"].map(String::from).to_vec(),
+                    exclude: ["foo"].map(String::from).to_vec(),
+                },
+            ),
+            (
+                "foo..bar baz ^bam",
+                RangeSpec {
+                    include: ["bar", "baz"].map(String::from).to_vec(),
+                    exclude: ["foo", "bam"].map(String::from).to_vec(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                RangeSpec::parse(&string).expect(&format!("failed to parse {:?} as RevSpec", string)),
+                want,
+                "for input string {:?}",
+                string,
+            );
+        }
+    }
+
+    #[test]
+    fn test_revspec_parse_error() {
+        for (string, want_msg) in [
+            ("..", "empty revision in range \"..\""),
+            ("f..", "empty revision in range \"f..\""),
+            ("..f", "empty revision in range \"..f\""),
+            (
+                "foo...bar",
+                "rev spec \"foo...bar\" - symmetric difference ranges not supported. \
+                        Did you mean '..' instead of '...'? See gitrevisions(7)",
+            ),
+        ] {
+            match RangeSpec::parse(&string) {
+                Ok(v) => panic!(
+                    "input string {:?} was parsed as {:?}, expected error",
+                    string, v
+                ),
+                Err(error) => {
+                    assert_eq!(error.to_string(), want_msg, "for input string {:?}", string)
+                }
+            }
+        }
     }
 }
