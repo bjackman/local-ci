@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context};
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
@@ -58,46 +58,91 @@ impl Repo {
     }
 }
 
+type RevSpec = OsString;
+
 #[derive(PartialEq, Debug)]
 /// Represents a git revision range specification. Note that just becuase the spec could be parsed,
 /// doesn't mean that this is actually a valid range in any given repository.
 pub struct RangeSpec {
-    include: Vec<String>,
-    exclude: Vec<String>,
+    include: Vec<RevSpec>,
+    exclude: Vec<RevSpec>,
+}
+
+// RevSpecs are not utf-8. Would like to just represent them as OsString but those lack useful
+// manipulation methods. Here we add them.
+trait OsStrExt2 {
+    // Ideally the params here would be generic as they are for the str methods. For now we just
+    // only implement the types we actually need.
+
+    // TODO: Is there a way to write this that doesn't require constructing a whole new Vec?
+    fn split(&self, s: u8) -> Vec<&OsStr>;
+    // Uses a naïve algorithm that will probably perform unnecessarily badly if s is large.
+    fn split2(&self, s: &str) -> Option<(&OsStr, &OsStr)>;
+    fn strip_prefix(&self, s: &str) -> Option<&OsStr>;
+}
+
+impl OsStrExt2 for OsStr {
+    fn split(&self, s: u8) -> Vec<&OsStr> {
+        self.as_bytes()
+            .split(|b| *b == u8::from(s))
+            .map(OsStr::from_bytes)
+            .collect()
+    }
+
+    fn split2(&self, s: &str) -> Option<(&OsStr, &OsStr)> {
+        let haystack = self.as_bytes();
+        let needle = s.as_bytes();
+        for i in 0..(haystack.len() - (needle.len() - 1)) {
+            if haystack[i..i + needle.len()] == *needle {
+                return Some((
+                    OsStr::from_bytes(&haystack[0..i]),
+                    OsStr::from_bytes(&haystack[i + needle.len()..]),
+                ));
+            }
+        }
+        return None;
+    }
+
+    fn strip_prefix(&self, s: &str) -> Option<&OsStr> {
+        match self.as_bytes().strip_prefix(s.as_bytes()) {
+            None => None,
+            Some(suffix) => Some(OsStr::from_bytes(suffix)),
+        }
+    }
 }
 
 impl RangeSpec {
-    fn parse(s: &str) -> anyhow::Result<Self> {
+    fn parse(s: &OsStr) -> anyhow::Result<Self> {
         let mut include = vec![];
         let mut exclude = vec![];
 
-        for part in s.split(" ") {
+        for part in s.split(b' ') {
             if part.is_empty() {
                 continue;
             }
 
-            // This could be implemented fairly easily, it just doesn't seem very useful.
-            if part.contains("...") {
-                return Err(anyhow!(
-                    "rev spec {:?} - symmetric difference ranges not supported. \
-                        Did you mean '..' instead of '...'? See gitrevisions(7)",
-                    part
-                ));
-            }
-
-            if let [from, to] = part.splitn(2, "..").collect::<Vec<_>>()[..] {
+            if let Some((from, to)) = part.split2("..") {
                 if from.is_empty() || to.is_empty() {
                     return Err(anyhow!("empty revision in range {:?}", part));
                 }
+                if to.as_bytes()[0] == b'.' {
+                    // We saw a third dot after the "..". We don't implement this syntax. This could
+                    // be implemented fairly easily, it just doesn't seem very useful.
+                    return Err(anyhow!(
+                        "rev spec {:?} - symmetric difference ranges not supported. \
+                        Did you mean '..' instead of '...'? See gitrevisions(7)",
+                        part
+                    ));
+                }
 
-                include.push(to.to_string());
-                exclude.push(from.to_string());
+                include.push(to.to_os_string());
+                exclude.push(from.to_os_string());
                 continue;
             }
 
             match part.strip_prefix("^") {
-                None => include.push(part.to_string()),
-                Some(suffix) => exclude.push(suffix.to_string()),
+                None => include.push(part.to_os_string()),
+                Some(suffix) => exclude.push(suffix.to_os_string()),
             };
         }
 
@@ -179,48 +224,49 @@ mod tests {
 
     #[test]
     fn test_revspec_parse() {
-        for (string, want) in [
+        for (spec, want) in [
             (
                 "foo",
                 RangeSpec {
-                    include: ["foo"].map(String::from).to_vec(),
+                    include: ["foo"].map(OsString::from).to_vec(),
                     exclude: vec![],
                 },
             ),
             (
                 "foo bar",
                 RangeSpec {
-                    include: ["foo", "bar"].map(String::from).to_vec(),
+                    include: ["foo", "bar"].map(OsString::from).to_vec(),
                     exclude: vec![],
                 },
             ),
             (
                 "foo ^bar ^baz",
                 RangeSpec {
-                    include: ["foo"].map(String::from).to_vec(),
-                    exclude: ["bar", "baz"].map(String::from).to_vec(),
+                    include: ["foo"].map(OsString::from).to_vec(),
+                    exclude: ["bar", "baz"].map(OsString::from).to_vec(),
                 },
             ),
             (
                 "foo..bar",
                 RangeSpec {
-                    include: ["bar"].map(String::from).to_vec(),
-                    exclude: ["foo"].map(String::from).to_vec(),
+                    include: ["bar"].map(OsString::from).to_vec(),
+                    exclude: ["foo"].map(OsString::from).to_vec(),
                 },
             ),
             (
                 "foo..bar baz ^bam",
                 RangeSpec {
-                    include: ["bar", "baz"].map(String::from).to_vec(),
-                    exclude: ["foo", "bam"].map(String::from).to_vec(),
+                    include: ["bar", "baz"].map(OsString::from).to_vec(),
+                    exclude: ["foo", "bam"].map(OsString::from).to_vec(),
                 },
             ),
         ] {
             assert_eq!(
-                RangeSpec::parse(&string).expect(&format!("failed to parse {:?} as RevSpec", string)),
+                RangeSpec::parse(&OsString::from(spec))
+                    .expect(&format!("failed to parse {:?} as RevSpec", spec)),
                 want,
                 "for input string {:?}",
-                string,
+                spec,
             );
         }
     }
@@ -237,7 +283,7 @@ mod tests {
                         Did you mean '..' instead of '...'? See gitrevisions(7)",
             ),
         ] {
-            match RangeSpec::parse(&string) {
+            match RangeSpec::parse(&OsString::from(string)) {
                 Ok(v) => panic!(
                     "input string {:?} was parsed as {:?}, expected error",
                     string, v
