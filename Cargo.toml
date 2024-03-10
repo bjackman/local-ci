@@ -12,3 +12,4 @@ crossbeam-channel = "0.5.11"
 nix = { version = "0.28.0", features = ["process", "signal", "fs", "feature"] }
 cancellation-token = "0.1.0"
 tempfile = "3.10.1"
+inotify = "0.10.2"

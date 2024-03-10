@@ -14,10 +14,12 @@ use std::process;
 // normal process API usage. Since this is partly a learning project, I'll do the fancy thing and
 // if it turns out to be too clever I'll have learned a lesson.
 pub trait CommandExt {
-    /// Like std::process::Command::output, but SIGINTs the child if the token is canceled. Also
-    /// unconditionally captures stderr and stdout.
+    // Like std::process::Command::output, but SIGINTs the child if the token is canceled. Also
+    // unconditionally captures stderr and stdout.
     fn output_ct(&mut self, ct: &CancellationToken) -> anyhow::Result<process::Output>;
-    /// Calls output_ct, and if the command fails, produces a very informative error.
+    // Like the above, but fails if the process is terminated by a signal.
+    fn output_not_killed(&mut self, ct: &CancellationToken) -> anyhow::Result<process::Output>;
+    // Like the above, but also fails if the process exits with a non-zero return code.
     // This is a convenience hack, somewhat like
     // std::process::ExitStatus::exit_ok, but it's more informative. Arguably we
     // should have a ExitStatusExt for that rather than just squashing it into CommandExt.
@@ -80,7 +82,7 @@ impl CommandExt for process::Command {
         return Ok(output);
     }
 
-    fn output_ok(&mut self, ct: &CancellationToken) -> anyhow::Result<()> {
+    fn output_not_killed(&mut self, ct: &CancellationToken) -> anyhow::Result<process::Output> {
         let output = self.output_ct(ct)?;
         match output.status.code() {
             None => Err(anyhow!(
@@ -90,8 +92,15 @@ impl CommandExt for process::Command {
                     .signal()
                     .expect("ExitStatus::code() and ExitStatus::signal() both None")
             )),
-            Some(0) => Ok(()),
-            Some(code) => Err(anyhow!(
+            Some(_) => Ok(output),
+        }
+    }
+
+    fn output_ok(&mut self, ct: &CancellationToken) -> anyhow::Result<()> {
+        let output = self.output_not_killed(ct)?;
+        match output.status.code().unwrap() {
+            0 => Ok(()),
+            code => Err(anyhow!(
                 "failed with exit code {}. stderr:\n{}\nstdout:\n{}",
                 code,
                 String::from_utf8_lossy(&output.stderr),

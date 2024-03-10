@@ -1,10 +1,16 @@
+use crate::process::CommandExt;
 use anyhow::{anyhow, Context};
+use cancellation_token::{CancelCallback, CancellationToken};
+use inotify::{Inotify, WatchMask};
+use nix::unistd;
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::Read;
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
+use std::process;
 
 // This module contains horribly manual git logic. This is manual for two main reasons:
 // - We need to be able to get notified of changes to ranges, this is not something that git
@@ -55,6 +61,100 @@ impl Repo {
         Ok(Repo {
             git_dir: PathBuf::from(git_path),
         })
+    }
+
+    fn rev_list(&self, ct: &CancellationToken, range_spec: &OsStr) -> anyhow::Result<Vec<OsString>> {
+        let mut cmd = process::Command::new("git");
+        cmd.arg("-C").arg(&self.git_dir).arg("rev-list").arg(range_spec);
+        let output = cmd.output_not_killed(&ct)?;
+        // Hack: empirically, rev-list returns 128 when the range is invalid, it's not documented
+        // but hopefully this is stable behaviour that we're supposed to be able to rely on for
+        // this...?
+        if output.status.code().unwrap() == 128 {
+            return Ok(vec![]);
+        }
+        let code = output.status.code().unwrap();
+        if code != 0 {
+            return Err(anyhow!(
+                "failed with exit code {}. stderr:\n{}\nstdout:\n{}",
+                code,
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            ));
+        }
+        Ok(OsStr::from_bytes(&output.stdout)
+            .split_lines()
+            .iter()
+            // TODO: How do I avoid allocating and copying each string here? I
+            // think I need to move the stdout into the caller, is there an
+            // ergonomic way to do that?
+            .map(|os_str| os_str.to_os_string())
+            .collect())
+    }
+
+    // Watch for events that could change the meaning of a revspec. When that happens, send an event
+    // on the channel with the new resolved spec.
+    pub fn watch_refs(
+        &self,
+        ct: CancellationToken,
+        range_spec: &OsStr,
+        tx: crossbeam_channel::Sender<Vec<OsString>>,
+    ) -> anyhow::Result<()> {
+        // We use inotify directly because a) this code anyway doesn't work on Windows and b) the
+        // generic "notify" crate seems under-specified, you can't seem to mask off the events you
+        // don't care about.
+        let mut inotify = Inotify::init().context("inotify init")?;
+        inotify.watches().add(
+            &self.git_dir,
+            WatchMask::CREATE | WatchMask::DELETE | WatchMask::MODIFY,
+        )?;
+
+        // Terrible hack (?) to shut down the inotify reader from the cancelling thread.
+        let fd = inotify.as_raw_fd();
+        ct.register(CancelCallback::FnOnce(Box::new(move || {
+            unistd::close(fd).expect("shutting down inotify");
+        })));
+
+        let mut evt_buf = [0; 4096];
+        loop {
+            let err = inotify.read_events_blocking(&mut evt_buf);
+            if ct.is_canceled() {
+                return Ok(());
+            }
+            err?;
+            tx.send(self.rev_list(&ct, range_spec)?)?;
+        }
+    }
+}
+
+trait OsStrExt {
+    fn split_lines(&self) -> Vec<&OsStr>;
+}
+
+impl OsStrExt for OsStr {
+    fn split_lines(&self) -> Vec<&OsStr> {
+        let mut start = 0;
+        let mut ret = vec![];
+        let sb = self.as_bytes();
+        let mut in_line = sb[0] != b'\n';
+        // How do i wrote code?
+        for i in 1..sb.len() {
+            if in_line {
+                if sb[i] == b'\n' {
+                    ret.push(OsStr::from_bytes(&sb[start..i]));
+                    in_line = false;
+                }
+            } else {
+                if sb[i] != b'\n' {
+                    start = i;
+                    in_line = true;
+                }
+            }
+        }
+        if in_line {
+            ret.push(OsStr::from_bytes(&sb[start..sb.len()]));
+        }
+        ret
     }
 }
 
