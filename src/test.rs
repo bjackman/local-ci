@@ -1,5 +1,6 @@
 use core::fmt;
 use core::fmt::Display;
+use parking_lot::Mutex;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -7,9 +8,9 @@ use std::ffi::OsString;
 use std::pin::pin;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use anyhow::{anyhow, Context};
+use async_condvar_fair::Condvar;
 use futures::future::{self, try_join_all, Either};
 use log::info;
 use nix::sys::signal::kill;
@@ -17,7 +18,6 @@ use nix::sys::signal::Signal;
 use nix::unistd::Pid;
 use tokio::process::Command;
 use tokio::sync::broadcast;
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
@@ -43,7 +43,7 @@ impl Test {
 // Manages a bunch of worker threads that run tests for the current set of revisions.
 pub struct Manager {
     job_cts: HashMap<CommitHash, CancellationToken>,
-    job_counter: JobCounter,
+    job_counter: Arc<JobCounter>,
     result_tx: broadcast::Sender<Arc<CommitTestResult>>,
     tests: Vec<Arc<Test>>,
     worktree_pool: Arc<Pool<TempWorktree>>,
@@ -79,7 +79,7 @@ impl Manager {
         Ok(Self {
             result_tx,
             job_cts: HashMap::new(),
-            job_counter: JobCounter::new(),
+            job_counter: Arc::new(JobCounter::new()),
             tests: tests.into_iter().map(Arc::new).collect(),
             worktree_pool: Arc::new(Pool::new(worktrees)),
         })
@@ -111,7 +111,7 @@ impl Manager {
                     ct,
                     test: test.clone(),
                     rev: rev.to_owned(),
-                    _token: self.job_counter.get(),
+                    _token: DecOnDrop::from(&self.job_counter),
                 };
                 let pool = self.worktree_pool.clone();
                 let tx = self.result_tx.clone();
@@ -150,59 +150,51 @@ impl Drop for Manager {
     }
 }
 
-// This is a horrible attempt to implement Manager::settled. There is no Condvar in tokio or
-// futures-rs, so we have this weird condvar-like construction using a Tokio watch channel.
+// Counter that can be incremented via DecOnDrop and which can notify when you
+// when it reaches zero.
 struct JobCounter {
-    // The first item in the pair is the counter; when it goes to zero the Sender will send a
-    // message.
-    pair: Arc<Mutex<(usize, watch::Sender<()>)>>,
+    cond: Condvar,
+    count: Mutex<usize>,
 }
 
 impl JobCounter {
     pub fn new() -> Self {
         Self {
-            pair: Arc::new(Mutex::new((0, watch::Sender::new(())))),
-        }
-    }
-
-    // Increment the counter. It is decremented when the token is dropped.
-    pub fn get(&self) -> JobToken {
-        let mut guard = self.pair.lock().unwrap();
-        let (ref mut count, _) = &mut *guard;
-        *count += 1;
-        JobToken {
-            pair: self.pair.clone(),
+            cond: Condvar::new(),
+            count: Mutex::new(0),
         }
     }
 
     #[cfg(test)]
     // Block until the counter is zero. If it's already zero, return immediately.
     pub async fn zero(&self) {
-        let mut rx = {
-            let mut guard = self.pair.lock().unwrap();
-            let (count, ref sender) = &mut *guard;
-            if *count == 0 {
-                return;
-            }
-            sender.subscribe()
-        };
-        rx.changed().await.expect("sender dropped in job counter");
+        let mut guard = self.count.lock();
+        while *guard != 0 {
+            guard = self.cond.wait(guard).await;
+        }
+    }
+}
+struct DecOnDrop {
+    counter: Arc<JobCounter>,
+}
+
+impl DecOnDrop {
+    // Increment the counter. It is decremented when the token is dropped.
+    fn from(counter: &Arc<JobCounter>) -> Self {
+        let mut guard = counter.count.lock();
+        *guard += 1;
+        Self {
+            counter: counter.clone(),
+        }
     }
 }
 
-struct JobToken {
-    // I'm not sure if there's some way to de-duplicate the contents of this struct against the main
-    // JobCounter?
-    pair: Arc<Mutex<(usize, watch::Sender<()>)>>,
-}
-
-impl Drop for JobToken {
+impl Drop for DecOnDrop {
     fn drop(&mut self) {
-        let mut guard = self.pair.lock().unwrap();
-        let (ref mut count, ref tx) = &mut *guard;
-        *count -= 1;
-        if *count == 0 && tx.receiver_count() > 0 {
-            tx.send(()).expect("receiver err in job counter");
+        let mut guard = self.counter.count.lock();
+        *guard -= 1;
+        if *guard == 0 {
+            self.counter.cond.notify_all();
         }
     }
 }
@@ -219,7 +211,7 @@ struct TestJob {
     // become possible to convince the compiler that the Manager outlives its Tests. Not sure.
     test: Arc<Test>,
     rev: CommitHash,
-    _token: JobToken,
+    _token: DecOnDrop,
 }
 
 impl TestJob {
