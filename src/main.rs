@@ -57,7 +57,9 @@ async fn main() -> anyhow::Result<()> {
         [Test {
             program: OsString::from(cmd.pop_front().unwrap()),
             args: cmd.iter().map(OsString::from).collect(),
+            needs_resource_idxs: vec![],
         }],
+        [],
     )
     .await
     .context("setting up test manager")?;

@@ -4,6 +4,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsString;
+use std::iter;
 use std::pin::pin;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -31,6 +32,9 @@ use crate::process::OutputExt;
 pub struct Test {
     pub program: OsString,
     pub args: Vec<OsString>,
+    // Indexes of pools in the Manager's token_pools from which this test needs
+    // a resource-token before it can begin.
+    pub needs_resource_idxs: Vec<usize>,
 }
 
 impl Test {
@@ -47,6 +51,9 @@ pub struct Manager {
     result_tx: broadcast::Sender<Arc<CommitTestResult>>,
     tests: Vec<Arc<Test>>,
     worktree_pool: Arc<Pool<TempWorktree>>,
+    // Pools of intangible arbitrary "resources" that can be used to throttle test jobs.
+    // Their indexes will be referenced by Test::needs_resource_idx values.
+    token_pools: Vec<Arc<Pool<()>>>,
 }
 
 impl Manager {
@@ -56,12 +63,13 @@ impl Manager {
     // this, but the solution would be to create the worktrees ondemand, when we have a revision we
     // are actually trying to test. That might be a good idea anyway, so probably it's preferable to
     // just do that for its own sake and leave the empty-repo problem as a nice freebie.
-    pub async fn new<W, I: IntoIterator<Item = Test>>(
+    pub async fn new<W, I: IntoIterator<Item = Test>, J: IntoIterator<Item = usize>>(
         num_threads: u32,
         // This needs to be an Arc because we hold onto a reference to it for a
         // while, and create temporary worktrees from it in the background.
         repo: Arc<W>,
         tests: I,
+        token_pool_sizes: J,
     ) -> anyhow::Result<Self>
     where
         // We need to specify 'static here. Just because we have an Arc over the
@@ -82,6 +90,10 @@ impl Manager {
             job_counter: JobCounter::new(),
             tests: tests.into_iter().map(|t| Arc::new(t)).collect(),
             worktree_pool: Arc::new(Pool::new(worktrees)),
+            token_pools: token_pool_sizes
+                .into_iter()
+                .map(|n| Arc::new(Pool::new(iter::repeat(()).take(n))))
+                .collect(),
         })
     }
 
@@ -469,6 +481,7 @@ mod tests {
             Test {
                 program: self.program(),
                 args: self.args(),
+                needs_resource_idxs: vec!(),
             }
         }
     }
@@ -586,7 +599,7 @@ mod tests {
             .await
             .expect("couldn't create test commit");
         let script = TestScript::new();
-        let mut m = Manager::new(2, fixture.repo.clone(), [script.as_test()])
+        let mut m = Manager::new(2, fixture.repo.clone(), [script.as_test()], [])
             .await
             .expect("couldn't set up manager");
         let mut results = m.results();
@@ -611,7 +624,7 @@ mod tests {
             .await
             .expect("couldn't create test commit");
         let script = TestScript::new();
-        let mut m = Manager::new(1, fixture.repo.clone(), [script.as_test()])
+        let mut m = Manager::new(1, fixture.repo.clone(), [script.as_test()], [])
             .await
             .expect("couldn't set up manager");
         let mut results = m.results();
@@ -658,7 +671,7 @@ mod tests {
             .await
             .expect("couldn't create test commit");
         let script = TestScript::new();
-        let mut m = Manager::new(1, fixture.repo.clone(), [script.as_test()])
+        let mut m = Manager::new(1, fixture.repo.clone(), [script.as_test()], [])
             .await
             .expect("couldn't set up manager");
         m.set_revisions([hash]);
@@ -692,7 +705,7 @@ mod tests {
             }
         }
         let script = TestScript::new();
-        let mut m = Manager::new(num_worktrees, fixture.repo.clone(), [script.as_test()])
+        let mut m = Manager::new(num_worktrees, fixture.repo.clone(), [script.as_test()], [])
             .await
             .expect("couldn't set up manager");
         let mut results = m.results();

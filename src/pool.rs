@@ -18,6 +18,7 @@ pub struct Pool<T> {
     // to a Go channel in tokio and no condition variables. This is actually
     // expected to block for a long time, so this is an async semaphore.
     sem: Semaphore,
+    pub size: usize,
 }
 
 impl<T> Pool<T> {
@@ -28,6 +29,7 @@ impl<T> Pool<T> {
         let vec: Vec<T> = objs.into_iter().collect();
         let len = vec.len();
         Self {
+            size: vec.len(),
             objs: Mutex::new(vec),
             sem: Semaphore::new(len),
         }
