@@ -132,7 +132,7 @@ impl<T: Send> Pools<T> {
     // Get the specified number of tokens from each of the pools, indexes match
     // the indexes used in new. Panics if the size of counts differs from the number of pools.
     // The tokens are held until you drop the returned value.
-    pub async fn get<I: IntoIterator<Item = usize>>(&self, token_counts: I) -> PoolsTokens<T> {
+    pub async fn get<I: IntoIterator<Item = usize>>(&self, token_counts: I) -> Resources<T> {
         let wants: Vec<_> = token_counts.into_iter().collect();
         let mut guard = self.resources.lock().unwrap();
         loop {
@@ -149,7 +149,7 @@ impl<T: Send> Pools<T> {
                 }
                 let obj = objs.pop().unwrap();
 
-                return PoolsTokens {
+                return Resources {
                     token_counts: ManuallyDrop::new(wants),
                     obj: ManuallyDrop::new(obj),
                     pools: self,
@@ -176,13 +176,19 @@ impl<T: Send> Pools<T> {
 
 #[derive(Debug)]
 // Tokens taken from a Pools.
-pub struct PoolsTokens<'a, T: Send> {
+pub struct Resources<'a, T: Send> {
     token_counts: ManuallyDrop<Vec<usize>>,
     obj: ManuallyDrop<T>,
     pools: &'a Pools<T>,
 }
 
-impl<T: Send> Drop for PoolsTokens<'_, T> {
+impl<T: Send> Resources<'_, T> {
+    pub fn obj(&self) -> &T {
+        &self.obj
+    }
+}
+
+impl<T: Send> Drop for Resources<'_, T> {
     fn drop(&mut self) {
         // SAFETY: This is safe as the fields are never accessed again.
         let (counts, obj) = unsafe {

@@ -4,7 +4,6 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::iter;
 use std::pin::pin;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -25,7 +24,7 @@ use crate::git::PersistentWorktree;
 use crate::git::TempWorktree;
 use crate::git::{CommitHash, Worktree};
 use crate::process::OutputExt;
-use crate::resource::Pool;
+use crate::resource::Pools;
 
 // A test task that will need to be repeated for each commit.
 pub struct Test {
@@ -49,10 +48,10 @@ pub struct Manager {
     job_counter: JobCounter,
     result_tx: broadcast::Sender<Arc<CommitTestResult>>,
     tests: Vec<Arc<Test>>,
-    worktree_pool: Arc<Pool<TempWorktree>>,
-    // Pools of intangible arbitrary "resources" that can be used to throttle test jobs.
-    // Their indexes will be referenced by Test::needs_resource_idx values.
-    token_pools: Vec<Arc<Pool<()>>>,
+    // Pools contains sets of intangible arbitrary "resources" that can be used to throttle test
+    // jobs, and also tracks access to reused worktrees. The indices of the token-type resources
+    // will be referenced by Test::needs_resource_idx values.
+    resource_pools: Arc<Pools<TempWorktree>>,
 }
 
 impl Manager {
@@ -88,11 +87,7 @@ impl Manager {
             job_cts: HashMap::new(),
             job_counter: JobCounter::new(),
             tests: tests.into_iter().map(Arc::new).collect(),
-            worktree_pool: Arc::new(Pool::new(worktrees)),
-            token_pools: token_pool_sizes
-                .into_iter()
-                .map(|n| Arc::new(Pool::new(iter::repeat(()).take(n))))
-                .collect(),
+            resource_pools: Arc::new(Pools::new(token_pool_sizes, worktrees)),
         })
     }
 
@@ -118,20 +113,22 @@ impl Manager {
             for test in self.tests.iter() {
                 let ct = CancellationToken::new();
                 self.job_cts.insert(rev.to_owned(), ct.clone());
-                let test = TestJob {
+                let job = TestJob {
                     ct,
                     test: test.clone(),
                     rev: rev.to_owned(),
                     _token: self.job_counter.get(),
                 };
-                let pool = self.worktree_pool.clone();
+                let pools = self.resource_pools.clone();
                 let tx = self.result_tx.clone();
                 tokio::spawn(async move {
-                    let worktree = pool.get().await;
-                    let result = test.run(worktree.as_ref()).await;
-                    // Note: must not drop test until the send is complete, or we would break settled().
+                    let resources = pools.get(job.test.needs_resource_idxs.clone()).await;
+                    let worktree = resources.obj();
+                    let result = job.run(worktree).await;
+                    // Note: must not drop test until the send is complete, or we would break
+                    // settled().
                     tx.send(Arc::new(CommitTestResult {
-                        hash: test.rev,
+                        hash: job.rev,
                         result,
                     }))
                     .expect("couldn't send result");
