@@ -104,78 +104,104 @@ impl<T: Send> Pool<T> {
 }
 
 #[derive(Debug)]
-// Collection of pools of "tokens" that can be waited for in arbitrary counts.
-pub struct Pools {
+// Collection of shared resources, consisting of some sub-pools of "tokens" and a singular pool of
+// objects. The user can request a given number tokens and one object - the tokens are just
+// implemented as counters while the objects are actually returned when requested.
+pub struct Pools<T> {
     cond: Condvar,
-    avail: Mutex<Vec<usize>>,
+    resources: Mutex<(Vec<usize>, Vec<T>)>,
 }
 
-impl Pools {
+impl<T: Send> Pools<T> {
     // Create a collection of pools where sizes specifies the initial number of tokens in each
     // pool.
-    pub fn new<I: IntoIterator<Item = usize>>(sizes: I) -> Self {
+    pub fn new<I, J>(token_counts: I, objs: J) -> Self
+    where
+        I: IntoIterator<Item = usize>,
+        J: IntoIterator<Item = T>,
+    {
         Self {
             cond: Condvar::new(),
-            avail: Mutex::new(sizes.into_iter().collect()),
+            resources: Mutex::new((
+                token_counts.into_iter().collect(),
+                objs.into_iter().collect(),
+            )),
         }
     }
 
     // Get the specified number of tokens from each of the pools, indexes match
     // the indexes used in new. Panics if the size of counts differs from the number of pools.
     // The tokens are held until you drop the returned value.
-    pub async fn get<I: IntoIterator<Item = usize>>(&self, counts: I) -> PoolsTokens {
-        let wants: Vec<_> = counts.into_iter().collect();
-        let mut guard = self.avail.lock().unwrap();
-        assert!(wants.len() == (*guard).len());
-        while (*guard)
-            .iter()
-            .zip(wants.iter())
-            .any(|(have, want)| have < want)
-        {
-            guard = self.cond.wait((guard, &self.avail)).await;
-        }
-        *guard = (*guard)
-            .iter()
-            .zip(wants.iter())
-            .map(|(have, want)| have - want)
-            .collect();
-        PoolsTokens {
-            counts: ManuallyDrop::new(wants),
-            pools: self,
+    pub async fn get<I: IntoIterator<Item = usize>>(&self, token_counts: I) -> PoolsTokens<T> {
+        let wants: Vec<_> = token_counts.into_iter().collect();
+        let mut guard = self.resources.lock().unwrap();
+        loop {
+            let (ref mut avail_token_counts, ref mut objs) = *guard;
+            assert!(wants.len() == avail_token_counts.len());
+            if avail_token_counts
+                .iter()
+                .zip(wants.iter())
+                .all(|(have, want)| have >= want)
+                && !objs.is_empty()
+            {
+                for (i, want) in wants.iter().enumerate() {
+                    avail_token_counts[i] -= want;
+                }
+                let obj = objs.pop().unwrap();
+
+                return PoolsTokens {
+                    token_counts: ManuallyDrop::new(wants),
+                    obj: ManuallyDrop::new(obj),
+                    pools: self,
+                };
+            }
+            guard = self.cond.wait((guard, &self.resources)).await;
         }
     }
 
-    fn put<I: IntoIterator<Item = usize>>(&self, counts: I) {
-        let counts: Vec<_> = counts.into_iter().collect();
-        let mut guard = self.avail.lock().unwrap();
-        assert!(counts.len() <= (*guard).len());
-        *guard = (*guard)
-            .iter()
-            .zip(counts.iter())
-            .map(|(a, b)| a + b)
-            .collect();
+    fn put<I: IntoIterator<Item = usize>>(&self, token_counts: I, obj: T) {
+        let token_counts: Vec<_> = token_counts.into_iter().collect();
+        let mut guard = self.resources.lock().unwrap();
+        let (ref mut avail_token_counts, ref mut objs) = *guard;
+        assert!(token_counts.len() == avail_token_counts.len());
+        for (i, want) in token_counts.iter().enumerate() {
+            avail_token_counts[i] += want;
+        }
+        objs.push(obj);
+        // Note this is pretty inefficient, we are waking up every getter even though we can satisfy
+        // at most one of them.
+        self.cond.notify_all();
     }
 }
 
 #[derive(Debug)]
 // Tokens taken from a Pools.
-pub struct PoolsTokens<'a> {
-    counts: ManuallyDrop<Vec<usize>>,
-    pools: &'a Pools,
+pub struct PoolsTokens<'a, T: Send> {
+    token_counts: ManuallyDrop<Vec<usize>>,
+    obj: ManuallyDrop<T>,
+    pools: &'a Pools<T>,
 }
 
-impl Drop for PoolsTokens<'_> {
+impl<T: Send> Drop for PoolsTokens<'_, T> {
     fn drop(&mut self) {
-        // SAFETY: This is safe as the field is never accessed again.
-        let counts = unsafe { ManuallyDrop::take(&mut self.counts) };
-        self.pools.put(counts)
+        // SAFETY: This is safe as the fields are never accessed again.
+        let (counts, obj) = unsafe {
+            (
+                ManuallyDrop::take(&mut self.token_counts),
+                ManuallyDrop::take(&mut self.obj),
+            )
+        };
+        self.pools.put(counts, obj)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use anyhow::bail;
-    use std::task::{Context, Poll};
+    use std::{
+        iter::repeat,
+        task::{Context, Poll},
+    };
 
     use futures::{pin_mut, task::noop_waker, Future};
 
@@ -209,13 +235,14 @@ mod tests {
 
     #[test_log::test]
     fn test_pools_one_empty_blocks() {
-        for (desc, sizes, wants) in [
-            ("one empty", vec![0], vec![1]),
-            ("two empty", vec![0, 0], vec![1, 0]),
-            ("two empty, want both", vec![0, 0], vec![1, 1]),
-            ("too many", vec![4], vec![6]),
+        for (desc, sizes, num_objs, wants) in [
+            ("one empty", vec![0], 1, vec![1]),
+            ("two empty", vec![0, 0], 1, vec![1, 0]),
+            ("two empty, want both", vec![0, 0], 1, vec![1, 1]),
+            ("too many", vec![4], 1, vec![6]),
+            ("no objs", vec![4], 0, vec![1]),
         ] {
-            let pool = Pools::new(sizes.clone());
+            let pool = Pools::<String>::new(sizes.clone(), repeat("obj".to_owned()).take(num_objs));
             check_pending(pool.get(wants.clone()))
                 .expect(format!("{}: {:?}.get({:?}) didn't block", desc, sizes, wants).as_str());
         }
@@ -246,7 +273,7 @@ mod tests {
 
     #[test_log::test(tokio::test)]
     async fn test_pools_get_some() {
-        let pools = Pools::new([3, 4]);
+        let pools = Pools::new([3, 4], ["obj1", "obj2"].map(|s| s.to_owned()));
         {
             let _tokens = pools.get(vec![1, 2]).await;
             check_pending(pools.get(vec![3, 0])).expect("returned too many tokens");
