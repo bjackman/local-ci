@@ -1,8 +1,20 @@
+use std::future;
 use std::marker::Send;
-use std::{mem::ManuallyDrop, ops::Deref, sync::Mutex};
+use std::{mem::ManuallyDrop, ops::Deref};
+#[cfg(not(loom))]
+use std::sync::{Mutex, MutexGuard};
+#[cfg(loom)]
+use loom::sync::{Mutex, MutexGuard};
 
-use async_condvar_fair::Condvar;
+use async_condvar_fair::{Condvar, RelockMutexGuard};
 use tokio::sync::{Semaphore, SemaphorePermit};
+
+// loom::sync::Mutex doesn't work nicely with async_condvar_fair, work around that by defining a
+// version that does.
+RelockMutexGuard!{
+    RelockableGuard(MutexGuard, Mutex)
+    l => { future::ready(l.lock().unwrap()) },
+}
 
 // Static collection of objects that can be temporarily allocated for mutually exclusive ownership.
 #[derive(Debug)]

@@ -1,20 +1,30 @@
-use anyhow::Context;
-use clap::Parser as _;
-use futures::StreamExt;
-use test::Test;
-use std::collections;
-use std::ffi::{OsStr, OsString};
-use std::pin::pin;
-use std::str;
-use std::sync::Arc;
-use tokio::select;
+#[cfg(not(loom))]
+mod non_loom_includes {
+    pub use anyhow::Context;
+    pub use clap::Parser as _;
+    pub use futures::StreamExt;
+    pub use crate::test::Test;
+    pub use std::collections;
+    pub use std::ffi::{OsStr, OsString};
+    pub use std::pin::pin;
+    pub use std::str;
+    pub use std::sync::Arc;
+    pub use tokio::select;
 
-use crate::git::Worktree;
+    pub use crate::git::Worktree;
+}
 
+#[cfg(not(loom))]
+use non_loom_includes::*;
+
+#[cfg(not(loom))]
 mod git;
-mod resource;
+#[cfg(not(loom))]
 mod process;
+#[cfg(not(loom))]
 mod test;
+
+mod resource;
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -36,6 +46,7 @@ struct Args {
     cmd: Vec<String>,
 }
 
+#[cfg(not(loom))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
