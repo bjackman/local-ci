@@ -328,6 +328,7 @@ mod tests {
     };
 
     use anyhow::bail;
+    use future::select_all;
     use futures::Future;
     use log::error;
     use tempfile::TempDir;
@@ -481,7 +482,7 @@ mod tests {
             Test {
                 program: self.program(),
                 args: self.args(),
-                needs_resource_idxs: vec!(),
+                needs_resource_idxs: vec![],
             }
         }
     }
@@ -556,7 +557,7 @@ mod tests {
         let timeout = Instant::now() + Duration::from_secs(5);
         while want.len() != 0 {
             let ctr = select!(
-                _ = sleep_until(timeout) => bail!("timeout after 1s"),
+                _ = sleep_until(timeout) => bail!("timeout after 5s, {} results remaining", want.len()),
                 output = results.recv() => output.context("test result stream terminated")?
             );
             let want_outcome = want
@@ -718,6 +719,47 @@ mod tests {
             .expect("bad reuslts");
     }
 
+    #[test_log::test(tokio::test)]
+    async fn should_respect_resource_limits() {
+        let fixture = Fixture::new().await;
+        let mut hashes = Vec::new();
+        for _ in 0..10 {
+            hashes.push(
+                fixture
+                    .repo
+                    .commit(TestScript::BLOCK_COMMIT_MSG_TAG)
+                    .await
+                    .expect("couldn't create test commit"),
+            );
+        }
+        let script = TestScript::new();
+        // We only have 2 tokens
+        let resource_token_counts = [2];
+        // And a test that requires one of those tokens.
+        let tests = [Test {
+            program: script.program(),
+            args: script.args(),
+            needs_resource_idxs: vec![1],
+        }];
+        let mut m = Manager::new(4, fixture.repo.clone(), tests, resource_token_counts)
+            .await
+            .expect("couldn't set up manager");
+        m.set_revisions(hashes.clone());
+
+        let mut start_futs = hashes.iter().map(|h| Box::pin(script.started(h))).collect();
+        for _ in 0..2 {
+            let (_started, _index, remaining) = timeout_1s(select_all(start_futs))
+                .await
+                .expect("didn't start first two jobs");
+            start_futs = remaining;
+        }
+
+        // Ugh, dunno how to do this except just wait for 1s...
+        select!(
+            _ = sleep(Duration::from_secs(1)) => (), // OK, nothing else ran.
+            _ = select_all(start_futs) => panic!("extra jobs started, resource limits not respected"),
+        )
+    }
     // TODO: if the tests fail, the TempWorktree cleanup goes haywire, something
     // to do with panic and drop order I think.
 }
