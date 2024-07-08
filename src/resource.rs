@@ -111,6 +111,7 @@ mod tests {
     };
 
     use futures::{pin_mut, task::noop_waker, Future};
+    use test_case::test_case;
 
     use super::*;
 
@@ -134,19 +135,15 @@ mod tests {
         }
     }
 
+    #[test_case(vec![0, 0], 1, vec![1, 0] ; "two empty")]
+    #[test_case(vec![0, 0], 1, vec![1, 1] ; "two empty, want both")]
+    #[test_case(vec![4], 1, vec![6] ; "too many")]
+    #[test_case(vec![0], 1, vec![1] ; "one empty")]
+    #[test_case(vec![4], 0, vec![1] ; "no objs")]
     #[test_log::test]
-    fn test_pools_one_empty_blocks() {
-        for (desc, sizes, num_objs, wants) in [
-            ("one empty", vec![0], 1, vec![1]),
-            ("two empty", vec![0, 0], 1, vec![1, 0]),
-            ("two empty, want both", vec![0, 0], 1, vec![1, 1]),
-            ("too many", vec![4], 1, vec![6]),
-            ("no objs", vec![4], 0, vec![1]),
-        ] {
-            let pool = Pools::<String>::new(sizes.clone(), repeat("obj".to_owned()).take(num_objs));
-            check_pending(pool.get(wants.clone()))
-                .expect(format!("{}: {:?}.get({:?}) didn't block", desc, sizes, wants).as_str());
-        }
+    fn test_pools_one_empty_blocks(sizes: Vec<usize>, num_objs: usize, wants: Vec<usize>) {
+        let pool = Pools::<String>::new(sizes.clone(), repeat("obj".to_owned()).take(num_objs));
+        check_pending(pool.get(wants.clone())).unwrap()
     }
 
     #[test_log::test(tokio::test)]
