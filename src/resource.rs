@@ -1,7 +1,8 @@
 use std::marker::Send;
-use std::{mem::ManuallyDrop, ops::Deref, sync::Mutex};
+use std::{mem::ManuallyDrop, ops::Deref};
 
 use async_condvar_fair::Condvar;
+use parking_lot::Mutex;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 // Static collection of objects that can be temporarily allocated for mutually exclusive ownership.
@@ -84,7 +85,7 @@ impl<T: Send> Pool<T> {
             .acquire()
             .await
             .expect("Pool bug: semaphore closed");
-        let mut objs = self.objs.lock().unwrap();
+        let mut objs = self.objs.lock();
         let obj = objs.pop().expect(
             "Pool empty when semaphore acquired . \
                 This probably means a call to Pool::put was missed.",
@@ -98,7 +99,7 @@ impl<T: Send> Pool<T> {
 
     // Add an item to the pool.
     fn put(&self, obj: T) {
-        let mut objs = self.objs.lock().unwrap();
+        let mut objs = self.objs.lock();
         objs.push(obj);
     }
 }
@@ -134,7 +135,7 @@ impl<T: Send> Pools<T> {
     // The tokens are held until you drop the returned value.
     pub async fn get<I: IntoIterator<Item = usize>>(&self, token_counts: I) -> Resources<T> {
         let wants: Vec<_> = token_counts.into_iter().collect();
-        let mut guard = self.resources.lock().unwrap();
+        let mut guard = self.resources.lock();
         loop {
             let (ref mut avail_token_counts, ref mut objs) = *guard;
             assert!(wants.len() == avail_token_counts.len());
@@ -155,13 +156,13 @@ impl<T: Send> Pools<T> {
                     pools: self,
                 };
             }
-            guard = self.cond.wait((guard, &self.resources)).await;
+            guard = self.cond.wait(guard).await;
         }
     }
 
     fn put<I: IntoIterator<Item = usize>>(&self, token_counts: I, obj: T) {
         let token_counts: Vec<_> = token_counts.into_iter().collect();
-        let mut guard = self.resources.lock().unwrap();
+        let mut guard = self.resources.lock();
         let (ref mut avail_token_counts, ref mut objs) = *guard;
         assert!(token_counts.len() == avail_token_counts.len());
         for (i, want) in token_counts.iter().enumerate() {

@@ -529,6 +529,7 @@ dependencies = [
  "log",
  "nix",
  "notify",
+ "parking_lot",
  "tempfile",
  "test-case",
  "test-log",
