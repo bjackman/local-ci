@@ -14,6 +14,7 @@ mod config;
 mod git;
 mod process;
 mod resource;
+mod status;
 mod test;
 
 #[cfg(test)]
@@ -64,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         .worktree_dir(&args.worktree_dir);
     let mut m = manager_builder.build().await?;
     let range_spec: OsString = format!("{}..HEAD", args.base).into();
+    let mut result_tracker = status::Tracker::new();
     let mut results = m.results();
     m.set_revisions(
         repo.rev_list(&range_spec)
@@ -78,14 +80,15 @@ async fn main() -> anyhow::Result<()> {
             // the channel, one implements Stream).
             revs = revs_stream.next() => {
                 // TODO: figure out if/how this can actually fail.
-                let revs = revs.expect("revset stream terminated");
-                m.set_revisions(revs?);
+                let revs = revs.expect("revset stream terminated")?;
+                result_tracker.set_revisions(revs.clone());
+                m.set_revisions(revs);
             },
             result = results.recv() => {
                 // https://github.com/rust-lang/futures-rs/issues/1857
                 // AFAICS there is no way to encode a stream that never terminates.
                 let result = result.expect("result stream terminated");
-                // TODO: What the fucking fuck???? I should have used Perl.
+                result_tracker.update(result.clone());
                 println!("{}", result);
             },
             _ =  signal::ctrl_c() => break,
