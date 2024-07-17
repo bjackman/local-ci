@@ -67,11 +67,11 @@ async fn main() -> anyhow::Result<()> {
     let range_spec: OsString = format!("{}..HEAD", args.base).into();
     let mut result_tracker = status::Tracker::new();
     let mut results = m.results();
-    m.set_revisions(
-        repo.rev_list(&range_spec)
+    let revs = repo.rev_list(&range_spec)
             .await
-            .context("couldn't rev-list")?,
-    );
+            .context("couldn't rev-list")?;
+    result_tracker.set_revisions(revs.clone());
+    m.set_revisions(revs);
     let mut revs_stream = repo.watch_refs(&range_spec)?;
     let mut revs_stream = pin!(revs_stream);
     loop {
@@ -89,7 +89,6 @@ async fn main() -> anyhow::Result<()> {
                 // AFAICS there is no way to encode a stream that never terminates.
                 let result = result.expect("result stream terminated");
                 result_tracker.update(result.clone());
-                println!("{}", result);
             },
             _ =  signal::ctrl_c() => break,
         )
