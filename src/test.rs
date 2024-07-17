@@ -132,7 +132,7 @@ impl<W> ManagerBuilder<W> {
 pub struct Manager {
     job_cts: HashMap<CommitHash, CancellationToken>,
     job_counter: JobCounter,
-    result_tx: broadcast::Sender<Arc<CommitTestResult>>,
+    result_tx: broadcast::Sender<Arc<TestResult>>,
     tests: Vec<Arc<Test>>,
     // Pools contains sets of intangible arbitrary "resources" that can be used to throttle test
     // jobs, and also tracks access to reused worktrees. The indices of the token-type resources
@@ -197,10 +197,10 @@ impl Manager {
                     let result = job.run(worktree).await;
                     // Note: must not drop test until the send is complete, or we would break
                     // settled().
-                    let _ = tx.send(Arc::new(CommitTestResult {
+                    let _ = tx.send(Arc::new(TestResult {
                         hash: job.rev,
-                        test_name: job.test.name.clone(),
-                        result,
+                        test_name: job.test.name.to_owned(),
+                        result
                     }))
                     .map_err(|e|
                         error!("Dropping a result. Seems nobody is listening to Manager::results(): {}", e)
@@ -214,7 +214,7 @@ impl Manager {
     // to receive.
     //
     // I think the "proper" solution for this is to return a Stream. But I don't understand it.
-    pub fn results(&self) -> broadcast::Receiver<Arc<CommitTestResult>> {
+    pub fn results(&self) -> broadcast::Receiver<Arc<TestResult>> {
         self.result_tx.subscribe()
     }
 
@@ -303,7 +303,7 @@ struct TestJob {
 }
 
 impl TestJob {
-    async fn run<W>(&self, worktree: &W) -> TestResult
+    async fn run<W>(&self, worktree: &W) -> anyhow::Result<TestOutcome>
     where
         W: Worktree,
     {
@@ -356,16 +356,20 @@ impl TestJob {
 }
 
 #[derive(Debug)]
-pub struct CommitTestResult {
+pub struct TestResult {
     pub hash: CommitHash,
-    // TODO: Store the whole test?
-    pub test_name: String,
-    pub result: TestResult,
+    // TODO: store more info here.
+    test_name: String,
+    result: anyhow::Result<TestOutcome>,
 }
 
-impl Display for CommitTestResult {
+impl Display for TestResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Result for {:?}: {} => ", self.test_name, self.hash)?;
+        write!(
+            f,
+            "Result for {:?}: {} => ",
+            self.test_name, self.hash
+        )?;
         match &self.result {
             Ok(outcome) => write!(f, "{}", outcome),
             Err(error) => write!(f, "error running test: {}", error),
@@ -377,8 +381,6 @@ impl Display for CommitTestResult {
 // cancellation, and completion. Ideally we woud just have an enum with three variants, but it's
 // really handy for the "error" case to be represented by std::result::Result so that we can use the
 // quesiton mark operator. Thus, we have a two-layered result type... Worth it? I dunno...
-type TestResult = anyhow::Result<TestOutcome>;
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum TestOutcome {
     Canceled,
@@ -587,7 +589,7 @@ mod tests {
 
     // anyhow::Error doesn't implement PartialEq. Here's an awkward comparator for
     // CommitTestResults, hopefully good enough for testing...?
-    impl PartialEq for CommitTestResult {
+    impl PartialEq for TestResult {
         fn eq(&self, other: &Self) -> bool {
             return self.hash == other.hash
                 && match (&self.result, &other.result) {
@@ -598,10 +600,10 @@ mod tests {
         }
     }
 
-    impl Eq for CommitTestResult {}
+    impl Eq for TestResult {}
 
     async fn expect_results_5s(
-        results: &mut broadcast::Receiver<Arc<CommitTestResult>>,
+        results: &mut broadcast::Receiver<Arc<TestResult>>,
         mut want: HashMap<CommitHash, TestOutcome>,
     ) -> anyhow::Result<()> {
         let timeout = Instant::now() + Duration::from_secs(5);
@@ -634,7 +636,7 @@ mod tests {
     }
 
     async fn expect_no_more_results(
-        results: &mut broadcast::Receiver<Arc<CommitTestResult>>,
+        results: &mut broadcast::Receiver<Arc<TestResult>>,
         m: &Manager,
     ) -> anyhow::Result<()> {
         select!(
