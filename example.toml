@@ -3,4 +3,8 @@ num_worktrees = 8
 
 [[tests]]
 name = "my_test"
-command = "hello world"
+command = "echo hello world"
+
+[[tests]]
+name = "my_slow_test"
+command = "sleep 5 && echo hello world"
