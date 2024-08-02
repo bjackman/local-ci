@@ -5,7 +5,7 @@ use std::time::Duration;
 use log::warn;
 
 use crate::git::CommitHash;
-use crate::test::TestResult;
+use crate::test::Notification;
 
 pub struct Tracker {
     multi_progress: indicatif::MultiProgress,
@@ -14,7 +14,7 @@ pub struct Tracker {
 
 struct CommitState {
     spinner: indicatif::ProgressBar,
-    result: Option<Arc<TestResult>>,
+    // result: Option<Arc<TestResult>>,
 }
 
 impl CommitState {
@@ -28,7 +28,6 @@ impl CommitState {
         spinner.enable_steady_tick(Duration::from_millis(100));
         Self {
             spinner,
-            result: None,
         }
     }
 }
@@ -42,28 +41,17 @@ impl Tracker {
     }
 
     pub fn set_revisions<T: IntoIterator<Item = CommitHash>>(&mut self, revs: T) {
-        let rev_set: HashSet<CommitHash> = revs.into_iter().collect();
-        self.results.retain(|k, _v| rev_set.contains(k));
-        for rev in rev_set {
-            if self.results.contains_key(&rev) {
-                continue;
-            }
-            let state = CommitState::pending(&rev);
-            // ProgressBar is documented as being an Arc.
-            self.multi_progress.add(state.spinner.clone());
-            self.results.insert(rev.to_owned(), state);
-        }
     }
 
-    pub fn update(&mut self, result: Arc<TestResult>) {
-        match self.results.get_mut(&result.test_case.hash) {
-            None => warn!("Unexpected result - {}", result),
-            Some(state) => {
-                if let Some(old_result) = state.result.replace(result.clone()) {
-                    warn!("Duplicated result - {} vs {}", old_result, result);
-                }
-                state.spinner.finish_with_message(result.to_string());
-            }
-        }
+    pub fn update(&mut self, result: Arc<Notification>) {
+        // match self.results.get_mut(&result.test_case.hash) {
+        //     None => warn!("Unexpected result - {}", result),
+        //     Some(state) => {
+        //         if let Some(old_result) = state.result.replace(result.clone()) {
+        //             warn!("Duplicated result - {} vs {}", old_result, result);
+        //         }
+        //         state.spinner.finish_with_message(result.to_string());
+        //     }
+        // }
     }
 }

@@ -132,7 +132,7 @@ impl<W> ManagerBuilder<W> {
 pub struct Manager {
     job_cts: HashMap<CommitHash, CancellationToken>,
     job_counter: JobCounter,
-    result_tx: broadcast::Sender<Arc<TestResult>>,
+    result_tx: broadcast::Sender<Arc<Notification>>,
     tests: Vec<Arc<Test>>,
     // Pools contains sets of intangible arbitrary "resources" that can be used to throttle test
     // jobs, and also tracks access to reused worktrees. The indices of the token-type resources
@@ -197,12 +197,17 @@ impl Manager {
                     let result = job.run(worktree).await;
                     // Note: must not drop test until the send is complete, or we would break
                     // settled().
-                    let _ = tx.send(Arc::new(TestResult {
+                    let _ = tx.send(Arc::new(Notification {
                         test_case: TestCase {
                         hash: job.rev,
                         test_name: job.test.name.to_owned(),
                         },
-                        result
+                        status: match result {
+                            Ok(None) => TestStatus::Canceled,
+                            // TODO: get rid of this unwrap by finding a cleaner
+                            // interface for TestJob::run.
+                            _ => TestStatus::Completed(result.map(| maybe_code | maybe_code.unwrap())),
+                        }
                     }))
                     .map_err(|e|
                         error!("Dropping a result. Seems nobody is listening to Manager::results(): {}", e)
@@ -216,7 +221,7 @@ impl Manager {
     // to receive.
     //
     // I think the "proper" solution for this is to return a Stream. But I don't understand it.
-    pub fn results(&self) -> broadcast::Receiver<Arc<TestResult>> {
+    pub fn results(&self) -> broadcast::Receiver<Arc<Notification>> {
         self.result_tx.subscribe()
     }
 
@@ -305,7 +310,8 @@ struct TestJob {
 }
 
 impl TestJob {
-    async fn run<W>(&self, worktree: &W) -> anyhow::Result<TestOutcome>
+    // Returns Ok(None) when canceled.
+    async fn run<W>(&self, worktree: &W) -> anyhow::Result<Option<ExitCode>>
     where
         W: Worktree,
     {
@@ -335,13 +341,15 @@ impl TestJob {
         let child_fut = pin!(child.wait_with_output());
         let cancel_fut = pin!(self.ct.cancelled());
         match future::select(child_fut, cancel_fut).await {
-            Either::Left((result, _)) =>
+            Either::Left((wait_result, _)) =>
             // Test completed, figure out the result. I think maybe a true Rustacean would
             // write this block as a single chain of methods? But it seems ridiculous to me.
             {
-                Ok(TestOutcome::Completed {
-                    exit_code: result.map_err(anyhow::Error::from)?.code_not_killed()?,
-                })
+                Ok(Some(
+                    wait_result
+                        .map_err(anyhow::Error::from)?
+                        .code_not_killed()?,
+                ))
             }
             Either::Right((_, child_fut)) => {
                 // Canceled. Shut down the process.
@@ -351,7 +359,7 @@ impl TestJob {
                 // worktree.
                 let _ = child_fut.await;
 
-                Ok(TestOutcome::Canceled)
+                Ok(None)
             }
         }
     }
@@ -362,41 +370,32 @@ pub struct TestCase {
     pub hash: CommitHash,
     test_name: String,
 }
+pub type ExitCode = i32;
 
 #[derive(Debug)]
-pub struct TestResult {
-    pub test_case: TestCase,
-    // TODO: store more info here.
-    result: anyhow::Result<TestOutcome>,
-}
-
-impl Display for TestResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Result for {:?} => ", self.test_case)?;
-        match &self.result {
-            Ok(outcome) => write!(f, "{}", outcome),
-            Err(error) => write!(f, "error running test: {}", error),
-        }
-    }
-}
-
-// There are three results for tests: error (something went wrong when we were trying to run it),
-// cancellation, and completion. Ideally we woud just have an enum with three variants, but it's
-// really handy for the "error" case to be represented by std::result::Result so that we can use the
-// quesiton mark operator. Thus, we have a two-layered result type... Worth it? I dunno...
-#[derive(Debug, PartialEq, Eq)]
-pub enum TestOutcome {
+pub enum TestStatus {
+    Enqueued,
+    Started,
     Canceled,
-    Completed { exit_code: i32 },
+    Completed(anyhow::Result<ExitCode>),
 }
 
-impl Display for TestOutcome {
+impl Display for TestStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Enqueued => write!(f, "Enqueued"),
+            Self::Started => write!(f, "Started"),
             Self::Canceled => write!(f, "Cancelled"),
-            Self::Completed { exit_code } => write!(f, "Completed - exit code {}", exit_code),
+            Self::Completed(Err(err)) => write!(f, "Failed testing - {:?}", err),
+            Self::Completed(Ok(exit_code)) => write!(f, "Completed - exit code {}", exit_code),
         }
     }
+}
+
+#[derive(Debug)]
+pub struct Notification {
+    test_case: TestCase,
+    status: TestStatus,
 }
 
 #[cfg(test)]
@@ -592,22 +591,29 @@ mod tests {
 
     // anyhow::Error doesn't implement PartialEq. Here's an awkward comparator for
     // CommitTestResults, hopefully good enough for testing...?
-    impl PartialEq for TestResult {
+    impl PartialEq for Notification {
         fn eq(&self, other: &Self) -> bool {
             return self.test_case == other.test_case
-                && match (&self.result, &other.result) {
-                    (Ok(my_outcome), Ok(other_outcome)) => my_outcome == other_outcome,
-                    (Err(my_err), Err(other_err)) => my_err.to_string() == other_err.to_string(),
+                && match (&self.status, &other.status) {
+                    (
+                        Notification::Completed(Ok(my_code)),
+                        Notification::Completed(Ok(other_code)),
+                    ) => my_code == other_code,
+                    (
+                        Notification::Completed(Err(my_err)),
+                        Notification::Completed(Err(other_err)),
+                    ) => my_err.to_string() == other_err.to_string(),
+                    (x, y) => x == y,
                     _ => false,
                 };
         }
     }
 
-    impl Eq for TestResult {}
+    impl Eq for Notification {}
 
-    async fn expect_results_5s(
-        results: &mut broadcast::Receiver<Arc<TestResult>>,
-        mut want: HashMap<CommitHash, TestOutcome>,
+    async fn expect_notifs_5s(
+        results: &mut broadcast::Receiver<Arc<Notification>>,
+        mut want: HashMap<TestCase, TestStatus>,
     ) -> anyhow::Result<()> {
         let timeout = Instant::now() + Duration::from_secs(5);
         while want.len() != 0 {
@@ -640,7 +646,7 @@ mod tests {
     }
 
     async fn expect_no_more_results(
-        results: &mut broadcast::Receiver<Arc<TestResult>>,
+        results: &mut broadcast::Receiver<Arc<Notification>>,
         m: &Manager,
     ) -> anyhow::Result<()> {
         select!(
@@ -667,7 +673,7 @@ mod tests {
         let mut results = m.results();
         m.set_revisions(vec![hash.clone()]);
         // We should get a singular result because we only fed in one revision.
-        expect_results_5s(
+        expect_notifs_5s(
             &mut results,
             HashMap::from([(hash, TestOutcome::Completed { exit_code: 0 })]),
         )
@@ -709,7 +715,7 @@ mod tests {
         timeout_1s(started_hash1.siginted())
             .await
             .expect("hash1 test did not get siginted");
-        expect_results_5s(
+        expect_notifs_5s(
             &mut results,
             HashMap::from([
                 (hash1, TestOutcome::Canceled),
@@ -777,7 +783,7 @@ mod tests {
             .expect("couldn't set up manager");
         let mut results = m.results();
         m.set_revisions(hashes.clone());
-        expect_results_5s(&mut results, want_results)
+        expect_notifs_5s(&mut results, want_results)
             .await
             .expect("bad reuslts");
     }
