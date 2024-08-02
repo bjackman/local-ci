@@ -70,7 +70,6 @@ async fn main() -> anyhow::Result<()> {
     let revs = repo.rev_list(&range_spec)
             .await
             .context("couldn't rev-list")?;
-    result_tracker.set_revisions(revs.clone());
     m.set_revisions(revs);
     let mut revs_stream = repo.watch_refs(&range_spec)?;
     let mut revs_stream = pin!(revs_stream);
@@ -81,7 +80,6 @@ async fn main() -> anyhow::Result<()> {
             revs = revs_stream.next() => {
                 // TODO: figure out if/how this can actually fail.
                 let revs = revs.expect("revset stream terminated")?;
-                result_tracker.set_revisions(revs.clone());
                 m.set_revisions(revs);
             },
             result = results.recv() => {

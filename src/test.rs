@@ -235,10 +235,9 @@ impl Manager {
                     let _ = tx.send(Arc::new(Notification {
                         test_case,
                         status: match result {
+                            Err(err) => TestStatus::Error(err.to_string()),
                             Ok(None) => TestStatus::Canceled,
-                            // TODO: get rid of this unwrap by finding a cleaner
-                            // interface for TestJob::run.
-                            _ => TestStatus::Completed(result.map(| maybe_code | maybe_code.unwrap())),
+                            Ok(Some(exit_code))  => TestStatus::Completed(exit_code),
                         }
                     }))
                     .map_err(|e|
@@ -404,12 +403,26 @@ pub struct TestCase {
 }
 pub type ExitCode = i32;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestStatus {
     Enqueued,
     Started,
     Canceled,
-    Completed(anyhow::Result<ExitCode>),
+    // anyhow::Error doesn't implement Clone. We don't really need the overall
+    // error handling fanciness since this is just part of the normal flow of
+    // the program, so we just define this as a normal case among this enum.
+    Error(String), // This includes the test getting terminated by a signal.
+    Completed(ExitCode),
+}
+
+impl TestStatus {
+    pub fn is_final(&self) -> bool {
+        match self {
+            Self::Canceled => true,
+            Self::Completed(_) => true ,
+            _ => false,
+        }
+    }
 }
 
 impl Display for TestStatus {
@@ -418,16 +431,16 @@ impl Display for TestStatus {
             Self::Enqueued => write!(f, "Enqueued"),
             Self::Started => write!(f, "Started"),
             Self::Canceled => write!(f, "Cancelled"),
-            Self::Completed(Err(err)) => write!(f, "Failed testing - {:?}", err),
-            Self::Completed(Ok(exit_code)) => write!(f, "Completed - exit code {}", exit_code),
+            Self::Error(msg) => write!(f, "Failed testing - {:?}", msg),
+            Self::Completed(exit_code) => write!(f, "Completed - exit code {}", exit_code),
         }
     }
 }
 
 #[derive(Debug)]
 pub struct Notification {
-    test_case: TestCase,
-    status: TestStatus,
+    pub test_case: TestCase,
+    pub status: TestStatus,
 }
 
 #[cfg(test)]
@@ -625,24 +638,6 @@ mod tests {
         }
     }
 
-    // anyhow::Error doesn't implement PartialEq. Here's an awkward comparator for
-    // CommitTestResults, hopefully good enough for testing...?
-    impl PartialEq for TestStatus {
-        fn eq(&self, other: &Self) -> bool {
-            match (&self, &other) {
-                (TestStatus::Completed(Ok(my_code)), TestStatus::Completed(Ok(other_code))) => {
-                    my_code == other_code
-                }
-                (TestStatus::Completed(Err(my_err)), TestStatus::Completed(Err(other_err))) => {
-                    my_err.to_string() == other_err.to_string()
-                }
-                (x, y) => mem::discriminant(*x) == mem::discriminant(*y),
-            }
-        }
-    }
-
-    impl Eq for TestStatus {}
-
     fn dump_want_statuses(want: &HashMap<TestCase, VecDeque<TestStatus>>) -> String {
         let mut ret = String::from("");
         for (test_case, statuses) in want {
@@ -731,7 +726,7 @@ mod tests {
                 vec![
                     TestStatus::Enqueued,
                     TestStatus::Started,
-                    TestStatus::Completed(Ok(0)),
+                    TestStatus::Completed(0),
                 ]
                 .into(),
             )]),
@@ -776,6 +771,7 @@ mod tests {
             .expect("hash1 test did not get siginted");
         expect_notifs_5s(
             &mut results,
+            // awu weh, weh mah
             HashMap::from([
                 (
                     TestCase {
@@ -799,7 +795,7 @@ mod tests {
                     vec![
                         TestStatus::Enqueued,
                         TestStatus::Started,
-                        TestStatus::Completed(Ok(0)),
+                        TestStatus::Completed(0),
                     ]
                     .into(),
                 ),
@@ -860,7 +856,7 @@ mod tests {
                     vec![
                         TestStatus::Enqueued,
                         TestStatus::Started,
-                        TestStatus::Completed(Ok(i)),
+                        TestStatus::Completed(i),
                     ]
                     .into(),
                 );
