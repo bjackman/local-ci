@@ -134,7 +134,9 @@ impl<W> ManagerBuilder<W> {
         .await
         .context("setting up temporary worktrees")?;
         info!("Worktree setup done.");
-        let (result_tx, _) = broadcast::channel(32);
+        // TODO: If this capacity gets exhausted, data gets lost and we get an error which this code
+        // probably doesn't handle very gracefully. We should instead just block the sender.
+        let (result_tx, _) = broadcast::channel(4096);
         Ok(Manager {
             result_tx,
             job_cts: HashMap::new(),
@@ -641,8 +643,19 @@ mod tests {
 
     impl Eq for TestStatus {}
 
+    fn dump_want_statuses(want: &HashMap<TestCase, VecDeque<TestStatus>>) -> String {
+        let mut ret = String::from("");
+        for (test_case, statuses) in want {
+            ret.push_str(&format!("{:?}\n", test_case));
+            for status in statuses {
+                ret.push_str(&format!("\t{:?}\n", status));
+            }
+        }
+        ret
+    }
     // Expect the series of notifications provided for each test case.
     // case. Also assert that the necessary precursor notifications arrive.
+    // Panics if any of the input series are empty.
     async fn expect_notifs_5s(
         results: &mut broadcast::Receiver<Arc<Notification>>,
         mut want: HashMap<TestCase, VecDeque<TestStatus>>,
@@ -651,21 +664,23 @@ mod tests {
         while want.len() != 0 {
             let notif = select!(
                 _ = sleep_until(timeout) => {
-                    bail!("timeout after 5s, {} results remaining", want.len())
+                    bail!("timeout after 5s, remaining results:\n{}",
+                        dump_want_statuses(&want));
                 },
-                output = results.recv() => output.context("test result stream terminated")?
+                output = results.recv() => {
+                    output.context(format!(
+                        "test result stream terminated, remaining results:\n{}",
+                        dump_want_statuses(&want)))?
+                }
             );
-            let want_status = want
-                .get_mut(&notif.test_case)
-                .context(format!(
-                    "got result for unexpected case {:?}",
-                    notif.test_case
-                ))?
-                .pop_front()
-                .context(format!(
-                    "got extra unexpected result for {:?};",
-                    notif.test_case
-                ))?;
+            let want_statuses = want.get_mut(&notif.test_case).context(format!(
+                "got result for unexpected case {:?}",
+                notif.test_case
+            ))?;
+            let want_status = want_statuses.pop_front().expect("empty status series");
+            if want_statuses.is_empty() {
+                want.remove(&notif.test_case);
+            }
             if notif.status != want_status {
                 bail!(
                     "unexpected test notification for {:?}, got {:?} want {:?}",
