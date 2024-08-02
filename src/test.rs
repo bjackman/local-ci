@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::process::Stdio;
@@ -29,6 +30,22 @@ use crate::git::TempWorktree;
 use crate::git::{CommitHash, Worktree};
 use crate::process::OutputExt;
 use crate::resource::Pools;
+
+pub trait ResultExt {
+    // Log an error if it occurs, prefixed with s, otherwise return nothing.
+    fn or_log_error(&self, s: &str);
+}
+
+impl<T, E> ResultExt for Result<T, E>
+where
+    E: Debug,
+{
+    fn or_log_error(&self, s: &str) {
+        if let Err(e) = self {
+            error!("{} - {:?}", s, e);
+        }
+    }
+}
 
 // A test task that will need to be repeated for each commit.
 pub struct Test {
@@ -189,19 +206,32 @@ impl Manager {
                     rev: rev.to_owned(),
                     _token: self.job_counter.get(),
                 };
-                let pools = self.resource_pools.clone();
+                let test_case = TestCase {
+                    hash: rev.to_owned(),
+                    test_name: test.name.to_owned(),
+                };
+
                 let tx = self.result_tx.clone();
+                tx.send(Arc::new(Notification {
+                    test_case: test_case.clone(),
+                    status: TestStatus::Enqueued,
+                }))
+                .or_log_error("Dropping a notificatoin");
+
+                let pools = self.resource_pools.clone();
                 tokio::spawn(async move {
                     let resources = pools.get(job.test.needs_resource_idxs.clone()).await;
+                    tx.send(Arc::new(Notification {
+                        test_case: test_case.clone(),
+                        status: TestStatus::Started,
+                    }))
+                    .or_log_error("Dropping a notificatoin");
                     let worktree = resources.obj();
                     let result = job.run(worktree).await;
                     // Note: must not drop test until the send is complete, or we would break
                     // settled().
                     let _ = tx.send(Arc::new(Notification {
-                        test_case: TestCase {
-                        hash: job.rev,
-                        test_name: job.test.name.to_owned(),
-                        },
+                        test_case,
                         status: match result {
                             Ok(None) => TestStatus::Canceled,
                             // TODO: get rid of this unwrap by finding a cleaner
@@ -365,7 +395,7 @@ impl TestJob {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct TestCase {
     pub hash: CommitHash,
     test_name: String,
@@ -374,8 +404,8 @@ pub type ExitCode = i32;
 
 #[derive(Debug)]
 pub enum TestStatus {
-    // Enqueued,
-    // Started,
+    Enqueued,
+    Started,
     Canceled,
     Completed(anyhow::Result<ExitCode>),
 }
@@ -383,8 +413,8 @@ pub enum TestStatus {
 impl Display for TestStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // Self::Enqueued => write!(f, "Enqueued"),
-            // Self::Started => write!(f, "Started"),
+            Self::Enqueued => write!(f, "Enqueued"),
+            Self::Started => write!(f, "Started"),
             Self::Canceled => write!(f, "Cancelled"),
             Self::Completed(Err(err)) => write!(f, "Failed testing - {:?}", err),
             Self::Completed(Ok(exit_code)) => write!(f, "Completed - exit code {}", exit_code),
@@ -400,7 +430,7 @@ pub struct Notification {
 
 #[cfg(test)]
 mod tests {
-    use std::{mem, path::PathBuf, thread::panicking, time::Duration};
+    use std::{collections::VecDeque, mem, path::PathBuf, thread::panicking, time::Duration};
 
     use anyhow::bail;
     use future::select_all;
@@ -611,27 +641,31 @@ mod tests {
 
     impl Eq for TestStatus {}
 
+    // Expect the series of notifications provided for each test case.
+    // case. Also assert that the necessary precursor notifications arrive.
     async fn expect_notifs_5s(
         results: &mut broadcast::Receiver<Arc<Notification>>,
-        mut want: HashMap<TestCase, TestStatus>,
+        mut want: HashMap<TestCase, VecDeque<TestStatus>>,
     ) -> anyhow::Result<()> {
         let timeout = Instant::now() + Duration::from_secs(5);
         while want.len() != 0 {
             let notif = select!(
-                _ = sleep_until(timeout) => bail!("timeout after 5s, {} results remaining", want.len()),
+                _ = sleep_until(timeout) => {
+                    bail!("timeout after 5s, {} results remaining", want.len())
+                },
                 output = results.recv() => output.context("test result stream terminated")?
             );
-            let want_status = want.remove(&notif.test_case).context(format!(
-                "got result for unexpected hash {}",
-                notif.test_case.hash
-            ))?;
-            // let got_outcome = ctr
-            //     .result
-            //     // Some weirdness: we get Arcs with Results in them, we cannot just ? them because
-            //     // anyhow::Error isn't Copy, it also doesn't implement Clone or anything. So, we get
-            //     // a reference to the error and create a new error from its string representation.
-            //     .as_ref()
-            //     .map_err(|e| anyhow!("error testing {}: {:?}", ctr.test_case.hash, e))?;
+            let want_status = want
+                .get_mut(&notif.test_case)
+                .context(format!(
+                    "got result for unexpected case {:?}",
+                    notif.test_case
+                ))?
+                .pop_front()
+                .context(format!(
+                    "got extra unexpected result for {:?};",
+                    notif.test_case
+                ))?;
             if notif.status != want_status {
                 bail!(
                     "unexpected test notification for {:?}, got {:?} want {:?}",
@@ -679,7 +713,12 @@ mod tests {
                     hash,
                     test_name: script.test_name().to_owned(),
                 },
-                TestStatus::Completed(Ok(0)),
+                vec![
+                    TestStatus::Enqueued,
+                    TestStatus::Started,
+                    TestStatus::Completed(Ok(0)),
+                ]
+                .into(),
             )]),
         )
         .await
@@ -728,7 +767,12 @@ mod tests {
                         hash: hash1,
                         test_name: script.test_name().to_owned(),
                     },
-                    TestStatus::Canceled,
+                    vec![
+                        TestStatus::Enqueued,
+                        TestStatus::Started,
+                        TestStatus::Canceled,
+                    ]
+                    .into(),
                 ),
                 // This isn't what we're testing here but we need to assert that it comes in so we can
                 // check below that nothing else comes in.
@@ -737,7 +781,12 @@ mod tests {
                         hash: hash2,
                         test_name: script.test_name().to_owned(),
                     },
-                    TestStatus::Completed(Ok(0)),
+                    vec![
+                        TestStatus::Enqueued,
+                        TestStatus::Started,
+                        TestStatus::Completed(Ok(0)),
+                    ]
+                    .into(),
                 ),
             ]),
         )
@@ -789,11 +838,17 @@ mod tests {
                     .await
                     .expect("couldn't create test commit");
                 want_results.insert(
-                TestCase {
-                    hash: hash.to_owned(),
-                    test_name: script.test_name().to_owned(),
-                },
-                TestStatus::Completed(Ok(i)));
+                    TestCase {
+                        hash: hash.to_owned(),
+                        test_name: script.test_name().to_owned(),
+                    },
+                    vec![
+                        TestStatus::Enqueued,
+                        TestStatus::Started,
+                        TestStatus::Completed(Ok(i)),
+                    ]
+                    .into(),
+                );
                 hashes.push(hash);
                 i += 1;
             }
@@ -807,7 +862,7 @@ mod tests {
         m.set_revisions(hashes.clone());
         expect_notifs_5s(&mut results, want_results)
             .await
-            .expect("bad reuslts");
+            .expect("bad results");
     }
 
     #[test_log::test(tokio::test)]
