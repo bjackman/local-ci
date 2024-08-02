@@ -365,7 +365,7 @@ impl TestJob {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TestCase {
     pub hash: CommitHash,
     test_name: String,
@@ -374,8 +374,8 @@ pub type ExitCode = i32;
 
 #[derive(Debug)]
 pub enum TestStatus {
-    Enqueued,
-    Started,
+    // Enqueued,
+    // Started,
     Canceled,
     Completed(anyhow::Result<ExitCode>),
 }
@@ -383,8 +383,8 @@ pub enum TestStatus {
 impl Display for TestStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Enqueued => write!(f, "Enqueued"),
-            Self::Started => write!(f, "Started"),
+            // Self::Enqueued => write!(f, "Enqueued"),
+            // Self::Started => write!(f, "Started"),
             Self::Canceled => write!(f, "Cancelled"),
             Self::Completed(Err(err)) => write!(f, "Failed testing - {:?}", err),
             Self::Completed(Ok(exit_code)) => write!(f, "Completed - exit code {}", exit_code),
@@ -400,7 +400,7 @@ pub struct Notification {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, thread::panicking, time::Duration};
+    use std::{mem, path::PathBuf, thread::panicking, time::Duration};
 
     use anyhow::bail;
     use future::select_all;
@@ -541,9 +541,13 @@ mod tests {
             }
         }
 
+        pub fn test_name(&self) -> &str {
+            "my_test"
+        }
+
         pub fn as_test(&self) -> Test {
             Test {
-                name: "my_test".to_owned(),
+                name: self.test_name().to_owned(),
                 program: self.program(),
                 args: self.args(),
                 needs_resource_idxs: vec![],
@@ -591,25 +595,21 @@ mod tests {
 
     // anyhow::Error doesn't implement PartialEq. Here's an awkward comparator for
     // CommitTestResults, hopefully good enough for testing...?
-    impl PartialEq for Notification {
+    impl PartialEq for TestStatus {
         fn eq(&self, other: &Self) -> bool {
-            return self.test_case == other.test_case
-                && match (&self.status, &other.status) {
-                    (
-                        Notification::Completed(Ok(my_code)),
-                        Notification::Completed(Ok(other_code)),
-                    ) => my_code == other_code,
-                    (
-                        Notification::Completed(Err(my_err)),
-                        Notification::Completed(Err(other_err)),
-                    ) => my_err.to_string() == other_err.to_string(),
-                    (x, y) => x == y,
-                    _ => false,
-                };
+            match (&self, &other) {
+                (TestStatus::Completed(Ok(my_code)), TestStatus::Completed(Ok(other_code))) => {
+                    my_code == other_code
+                }
+                (TestStatus::Completed(Err(my_err)), TestStatus::Completed(Err(other_err))) => {
+                    my_err.to_string() == other_err.to_string()
+                }
+                (x, y) => mem::discriminant(*x) == mem::discriminant(*y),
+            }
         }
     }
 
-    impl Eq for Notification {}
+    impl Eq for TestStatus {}
 
     async fn expect_notifs_5s(
         results: &mut broadcast::Receiver<Arc<Notification>>,
@@ -617,30 +617,29 @@ mod tests {
     ) -> anyhow::Result<()> {
         let timeout = Instant::now() + Duration::from_secs(5);
         while want.len() != 0 {
-            let ctr = select!(
+            let notif = select!(
                 _ = sleep_until(timeout) => bail!("timeout after 5s, {} results remaining", want.len()),
                 output = results.recv() => output.context("test result stream terminated")?
             );
-            let want_outcome = want.get(&ctr.test_case.hash).context(format!(
+            let want_status = want.remove(&notif.test_case).context(format!(
                 "got result for unexpected hash {}",
-                ctr.test_case.hash
+                notif.test_case.hash
             ))?;
-            let got_outcome = ctr
-                .result
-                // Some weirdness: we get Arcs with Results in them, we cannot just ? them because
-                // anyhow::Error isn't Copy, it also doesn't implement Clone or anything. So, we get
-                // a reference to the error and create a new error from its string representation.
-                .as_ref()
-                .map_err(|e| anyhow!("error testing {}: {:?}", ctr.test_case.hash, e))?;
-            if *got_outcome != *want_outcome {
+            // let got_outcome = ctr
+            //     .result
+            //     // Some weirdness: we get Arcs with Results in them, we cannot just ? them because
+            //     // anyhow::Error isn't Copy, it also doesn't implement Clone or anything. So, we get
+            //     // a reference to the error and create a new error from its string representation.
+            //     .as_ref()
+            //     .map_err(|e| anyhow!("error testing {}: {:?}", ctr.test_case.hash, e))?;
+            if notif.status != want_status {
                 bail!(
-                    "unexpected test result for {}, got {} want {}",
-                    ctr.test_case.hash,
-                    got_outcome,
-                    want_outcome
+                    "unexpected test notification for {:?}, got {:?} want {:?}",
+                    notif.test_case,
+                    notif.status,
+                    want_status
                 );
             }
-            want.remove(&ctr.test_case.hash);
         }
         Ok(())
     }
@@ -675,7 +674,13 @@ mod tests {
         // We should get a singular result because we only fed in one revision.
         expect_notifs_5s(
             &mut results,
-            HashMap::from([(hash, TestOutcome::Completed { exit_code: 0 })]),
+            HashMap::from([(
+                TestCase {
+                    hash,
+                    test_name: script.test_name().to_owned(),
+                },
+                TestStatus::Completed(Ok(0)),
+            )]),
         )
         .await
         .expect("bad test result");
@@ -718,10 +723,22 @@ mod tests {
         expect_notifs_5s(
             &mut results,
             HashMap::from([
-                (hash1, TestOutcome::Canceled),
+                (
+                    TestCase {
+                        hash: hash1,
+                        test_name: script.test_name().to_owned(),
+                    },
+                    TestStatus::Canceled,
+                ),
                 // This isn't what we're testing here but we need to assert that it comes in so we can
                 // check below that nothing else comes in.
-                (hash2, TestOutcome::Completed { exit_code: 0 }),
+                (
+                    TestCase {
+                        hash: hash2,
+                        test_name: script.test_name().to_owned(),
+                    },
+                    TestStatus::Completed(Ok(0)),
+                ),
             ]),
         )
         .await
@@ -758,6 +775,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn should_handle_many(num_worktrees: usize, num_tests: usize) {
         let fixture = Fixture::new().await;
+        let script = TestScript::new();
         let mut hashes = Vec::new();
         let mut want_results = HashMap::new();
         let mut i = 0;
@@ -770,12 +788,16 @@ mod tests {
                     .commit(TestScript::exit_code_tag(i as u32))
                     .await
                     .expect("couldn't create test commit");
-                want_results.insert(hash.clone(), TestOutcome::Completed { exit_code: i });
+                want_results.insert(
+                TestCase {
+                    hash: hash.to_owned(),
+                    test_name: script.test_name().to_owned(),
+                },
+                TestStatus::Completed(Ok(i)));
                 hashes.push(hash);
                 i += 1;
             }
         }
-        let script = TestScript::new();
         let mut m = Manager::builder(fixture.repo.clone(), [script.as_test()], [])
             .num_worktrees(num_worktrees)
             .build()
