@@ -56,7 +56,7 @@ impl Tracker {
     }
 
     pub fn update(&mut self, result: Arc<TestResult>) {
-        match self.results.get_mut(&result.hash) {
+        match self.results.get_mut(&result.test_case.hash) {
             None => warn!("Unexpected result - {}", result),
             Some(state) => {
                 if let Some(old_result) = state.result.replace(result.clone()) {
