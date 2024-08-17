@@ -1,7 +1,7 @@
 use core::fmt;
 use core::fmt::{Debug, Display};
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt as _;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::process::Command as SyncCommand;
@@ -117,6 +117,24 @@ pub trait Worktree: Debug {
             ))
     }
 
+    async fn log_graph(&self, range_spec: &OsStr, format_spec: &OsStr) -> anyhow::Result<OsString> {
+        let mut cmd = Command::new("git");
+        let mut format_arg = OsString::from("--format=");
+        format_arg.push(format_spec);
+        let stdout = cmd
+            .args(["log", "--graph"])
+            .args([&format_arg, range_spec])
+            .current_dir(self.path())
+            .execute()
+            .await
+            .context(format!(
+                "getting graph log for {:?} with format {:?}",
+                range_spec, format_spec,
+            ))?
+            .stdout;
+        Ok(OsString::from_vec(stdout))
+    }
+
     // Watch for events that could change the meaning of a revspec. When that happens, send an event
     // on the channel with the new resolved spec.
     fn watch_refs<'a>(
@@ -171,6 +189,10 @@ pub trait Worktree: Debug {
         // on the downstream logic as Git works its way through changes.
         Ok(try_stream! {
             let _watcher = watcher; // Capture so it doesn't get dropped
+
+            // Produce an initial update.
+            yield self.rev_list(range_spec).await?;
+
             // Start with an expired timer.
             let mut sleep_fut = pin!(Fuse::terminated());
             loop {

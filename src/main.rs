@@ -16,6 +16,7 @@ mod config;
 mod git;
 mod process;
 mod resource;
+mod status;
 mod test;
 mod result;
 
@@ -89,14 +90,10 @@ async fn main() -> anyhow::Result<()> {
     let manager_builder = config::manager_builder(repo.clone(), &args.config)?
         .worktree_prefix(&args.worktree_prefix)
         .worktree_dir(&args.worktree_dir);
-    let mut m = manager_builder.build().await?;
+    let mut test_manager = manager_builder.build().await?;
     let range_spec: OsString = format!("{}..HEAD", args.base).into();
-    let mut results = m.results();
-    m.set_revisions(
-        repo.rev_list(&range_spec)
-            .await
-            .context("couldn't rev-list")?,
-    )?;
+    let mut results = test_manager.results();
+    let status_tracker = status::Tracker::new(repo.clone());
     let mut revs_stream = repo.watch_refs(&range_spec)?;
     let mut revs_stream = pin!(revs_stream);
     loop {
@@ -105,23 +102,27 @@ async fn main() -> anyhow::Result<()> {
             // the channel, one implements Stream).
             revs = revs_stream.next() => {
                 // TODO: figure out if/how this can actually fail.
-                let revs = revs.expect("revset stream terminated");
-                m.set_revisions(revs?)?;
+                let revs = revs.expect("revset stream terminated")?;
+                // Paying for a pointless clone here so we can do set_revisions
+                // (mostly just kicks off background stuff) before awaiting the
+                // status tracker reset (does synchronhous work).
+                test_manager.set_revisions(revs.clone())?;
+                status_tracker.reset(&range_spec, &revs).await.context("resetting status tracker")?;
             },
             result = results.recv() => {
                 // https://github.com/rust-lang/futures-rs/issues/1857
                 // AFAICS there is no way to encode a stream that never terminates.
-                let result = result.expect("result stream terminated");
+                let _result = result.expect("result stream terminated");
                 // TODO: What the fucking fuck???? I should have used Perl.
-                println!("{:?}", result);
+                // println!("{:?}", result);
             },
             _ =  cancellation_token.cancelled() => {
                 info!("Got shutdown signal, terminating jobs and waiting");
-                m.set_revisions([])?;
+                test_manager.set_revisions([])?;
                 break;
             }
         )
     }
-    m.settled().await;
+    test_manager.settled().await;
     Ok(())
 }
