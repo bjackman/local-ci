@@ -419,9 +419,14 @@ impl TestStatus {
     pub fn is_final(&self) -> bool {
         match self {
             Self::Canceled => true,
-            Self::Completed(_) => true ,
+            Self::Completed(_) => true,
             _ => false,
         }
+    }
+
+    // This is the first status we shoudl expect to observe for any TestCase.
+    pub fn initial() -> Self {
+        Self::Enqueued
     }
 }
 
@@ -445,7 +450,7 @@ pub struct Notification {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, mem, path::PathBuf, thread::panicking, time::Duration};
+    use std::{collections::VecDeque, path::PathBuf, thread::panicking, time::Duration};
 
     use anyhow::bail;
     use future::select_all;
