@@ -17,7 +17,7 @@ pub struct Tracker<W: Worktree> {
 
 // This ought to be private to Tracker::reset, rust just doesn't seem to let you do that.
 lazy_static! {
-    static ref COMMIT_HASH_REGEX: Regex = Regex::new("[0-9a0z]+").unwrap();
+    static ref COMMIT_HASH_REGEX: Regex = Regex::new("[0-9a-z]+").unwrap();
 }
 
 impl<W: Worktree> Tracker<W> {
@@ -83,13 +83,17 @@ impl<W: Worktree> Tracker<W> {
         }
         chunks.push(cur_chunk);
 
-        let mut output = Vec::new();
+        let mut output = Vec::<u8>::new();
         for chunk in chunks {
             // The commit hash should be the only alphanumeric sequence in
             // the chunk.
             let matches: Vec<_> = COMMIT_HASH_REGEX.find_iter(&chunk).collect();
             if matches.len() != 1 {
-                bail!("matched {} commit hashes in graph chunk", matches.len());
+                bail!(
+                    "matched {} commit hashes in graph chunk:\n{:?}",
+                    matches.len(),
+                    chunk
+                );
             }
             let hash = CommitHash(matches.first().unwrap().as_str().to_owned());
 
@@ -102,21 +106,28 @@ impl<W: Worktree> Tracker<W> {
             // just squash to utf-8, sorry users.
             let log_n1 = log_n1_os.to_string_lossy();
 
-            let mut graph_lines: Vec<&str> = chunk.split("\n").collect();
-            let info_lines: Vec<&str> = log_n1.split("\n").collect();
-            let graph_line_deficit = graph_lines.len() as isize - info_lines.len() as isize;
+            let graph_lines: Vec<&str> = chunk.split("\n").collect();
+            let mut info_lines: Vec<&str> = log_n1.split("\n").collect();
+            let graph_line_deficit = info_lines.len() as isize - graph_lines.len() as isize;
             if graph_line_deficit > 0 {
-                panic!("TODO: vertically stretch graph")
+                panic!(
+                    "TODO: vertically stretch graph ({:?} vs {:?})",
+                    graph_lines, info_lines
+                )
             } else {
                 // Append empty entries to the info lines so that the zip below works nicely.
-                info_lines.append(vec![String::new, -graph_line_deficit as usize]);
+                info_lines.append(&mut vec![""; -graph_line_deficit as usize]);
             }
             output.append(
-                graph_lines
+                &mut graph_lines
                     .iter()
                     .zip(info_lines.iter())
-                    .map(|(graph, info)| graph + info),
-            )
+                    .map(|(graph, info)| (*graph).to_owned() + *info)
+                    // TODO: can we get rid of the collect and just call .join on the map iterator?
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into_bytes(),
+            );
         }
         stdout().write(&output).context("couldn't write stdout")?;
         println!("next");
