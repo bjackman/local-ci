@@ -24,7 +24,7 @@ use crate::process::CommandExt;
 use crate::process::{OutputExt, SyncCommandExt};
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
-pub struct CommitHash(String);
+pub struct CommitHash(pub String);
 
 impl AsRef<OsStr> for CommitHash {
     fn as_ref(&self) -> &OsStr {
@@ -130,6 +130,25 @@ pub trait Worktree: Debug {
             .context(format!(
                 "getting graph log for {:?} with format {:?}",
                 range_spec, format_spec,
+            ))?
+            .stdout;
+        Ok(OsString::from_vec(stdout))
+    }
+    
+    async fn log_n1(&self, rev_spec: &OsStr, format_spec: &OsStr) -> anyhow::Result<OsString> {
+        // TODO: De-duplicate!
+        let mut cmd = Command::new("git");
+        let mut format_arg = OsString::from("--format=");
+        format_arg.push(format_spec);
+        let stdout = cmd
+            .args(["log", "-n1"])
+            .args([&format_arg, rev_spec])
+            .current_dir(self.path())
+            .execute()
+            .await
+            .context(format!(
+                "getting -n1 log for {:?} with format {:?}",
+                rev_spec, format_spec,
             ))?
             .stdout;
         Ok(OsString::from_vec(stdout))

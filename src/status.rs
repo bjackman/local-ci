@@ -1,12 +1,13 @@
 use std::{
     ffi::OsStr,
     io::{stdout, Write as _},
+    mem,
     sync::Arc,
 };
 
-use anyhow::{self, Context as _};
+use anyhow::{self, bail, Context as _};
 use lazy_static::lazy_static;
-use regex::bytes::Regex;
+use regex::Regex;
 
 use crate::git::{CommitHash, Worktree};
 
@@ -16,8 +17,7 @@ pub struct Tracker<W: Worktree> {
 
 // This ought to be private to Tracker::reset, rust just doesn't seem to let you do that.
 lazy_static! {
-    static ref GRAPH_ANCHOR_REGEX: Regex =
-        Regex::new("(?m)^(?<graph1>.+)\t(?<hash>[0-9a-z]+) (?<posthash>.*)\n(?<graph2>.+)\n").unwrap();
+    static ref COMMIT_HASH_REGEX: Regex = Regex::new("[0-9a0z]+").unwrap();
 }
 
 impl<W: Worktree> Tracker<W> {
@@ -40,34 +40,83 @@ impl<W: Worktree> Tracker<W> {
         // the graph logic can still sometimes occupy more more lines when
         // history is very complex.
         //
-        // I'm gonna try implementing the patching logic with just raw terminal escape codes.
-        // This should be fun to try, but it might turn out this is a dumb thing
-        // to try and do without some sort of cleverer framework, let's see.
+        // So here's the idea: we just git git to dump out the graph. We divide
+        // this graph buffer into chunks that begin at the start of a line that
+        // contains a commit hash. This will look something like:
+        /*
 
-        // Ideally we'd allow the user to configure arbitrary display formats
-        // here, and the use null bytes to detect where we get to inject our
-        // extra info.
-        // This would need a bit of research to figure out if those null bytes
-        // can appear autochthonously in any Git fields, I suspect that they
-        // cannot but perhaps they can appear in commit messages?
-        //
-        // Anyway, it turns out that having null bytes in the format string
-        // breaks (switches off) Git's graph generation. So for now we will just
-        // have to hard-code a format string and instead use whitespace
-        // as the anchor characters.
-        //
-        // For convenience of lookup in our own data structures we'll use the
-        // full commit hash, but then for readability we'll strip that out and
-        // just display Git's abbreviation of the hash (which IIUC has some
-        // smarts to abbreviate as much as is safe for the given commit/repo but
-        // not more).
-        let fmt = "\t%H %d %h %s\n";
-        let log_buf = self.repo.log_graph(range_spec, OsStr::new(&fmt)).await?;
+         | * |   e96277a570cd32432fjklfef
+         | |\ \
+         | | |/
+         | |/|
+
+        */
+        // We want to display a) some more human-readable information about the
+        // commit (i.e. what you get from logging with a more informative
+        // --format) and b) our injected test status data. Overall this will
+        // produce some other buffer. If it has less lines than the graph buffer
+        // chunk, we can just append those lines onto the lines of the graph
+        // buffer pairwise. If it has more lines then we will need to stretch
+        // out the graph vertically to make space first.
+
+        // This should eventually be configurable.
+        let log_format = "%h %d %s";
+
+        let graph_buf = self
+            .repo
+            // TODO: Get rid of explicit OsStr::new everywhere.
+            .log_graph(range_spec, OsStr::new("%H"))
+            .await?
+            // OsStr doesn't have a proper API, luckily we can expect utf-8.
+            .into_string()
+            .map_err(|_err| anyhow::anyhow!("got non-utf8 output from git log"))?;
+
+        // TODO: do this without all the copying!
+        let mut cur_chunk = String::new();
+        let mut chunks = Vec::new();
+        for line in graph_buf.split("\n") {
+            // --graph uses * to represent a node in the DAG.
+            if line.contains("*") && !cur_chunk.is_empty() {
+                chunks.push(mem::take(&mut cur_chunk));
+            }
+            cur_chunk = cur_chunk + line + "\n";
+        }
+        chunks.push(cur_chunk);
 
         let mut output = Vec::new();
-        for capture in GRAPH_ANCHOR_REGEX.captures_iter(log_buf.as_encoded_bytes())
-        {
-            capture.expand("${graph1}posthash: ${posthash}\n${graph2} COKEY\n".as_bytes(), &mut output);
+        for chunk in chunks {
+            // The commit hash should be the only alphanumeric sequence in
+            // the chunk.
+            let matches: Vec<_> = COMMIT_HASH_REGEX.find_iter(&chunk).collect();
+            if matches.len() != 1 {
+                bail!("matched {} commit hashes in graph chunk", matches.len());
+            }
+            let hash = CommitHash(matches.first().unwrap().as_str().to_owned());
+
+            let log_n1_os = self
+                .repo
+                .log_n1(OsStr::new(&hash), OsStr::new(&log_format))
+                .await
+                .context(format!("couldn't get commit data for {:?}", hash))?;
+            // Hack: because OsStr doesn't have a proper API, luckily we can
+            // just squash to utf-8, sorry users.
+            let log_n1 = log_n1_os.to_string_lossy();
+
+            let mut graph_lines: Vec<&str> = chunk.split("\n").collect();
+            let info_lines: Vec<&str> = log_n1.split("\n").collect();
+            let graph_line_deficit = graph_lines.len() as isize - info_lines.len() as isize;
+            if graph_line_deficit > 0 {
+                panic!("TODO: vertically stretch graph")
+            } else {
+                // Append empty entries to the info lines so that the zip below works nicely.
+                info_lines.append(vec![String::new, -graph_line_deficit as usize]);
+            }
+            output.append(
+                graph_lines
+                    .iter()
+                    .zip(info_lines.iter())
+                    .map(|(graph, info)| graph + info),
+            )
         }
         stdout().write(&output).context("couldn't write stdout")?;
         println!("next");
