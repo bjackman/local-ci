@@ -84,7 +84,10 @@ impl OutputBuffer {
         }
     }
 
-    pub async fn new<W: Worktree>(repo: &Arc<W>, range_spec: &OsStr) -> anyhow::Result<Self> {
+    pub async fn new<W: Worktree, S: AsRef<OsStr>>(
+        repo: &Arc<W>,
+        range_spec: S,
+    ) -> anyhow::Result<Self> {
         // All right this is gonna seem pretty hacky. We're gonna get the --graph log
         // as a text blob, then we're gonna use our pre-existing knowledge about
         // its contents as position anchors to patch it with the information we need.
@@ -124,7 +127,7 @@ impl OutputBuffer {
 
         let graph_buf = repo
             // TODO: Get rid of explicit OsStr::new everywhere.
-            .log_graph(range_spec, OsStr::new("%H\n"))
+            .log_graph(range_spec.as_ref(), OsStr::new("%H\n"))
             .await?
             // OsStr doesn't have a proper API, luckily we can expect utf-8.
             .into_string()
@@ -180,7 +183,7 @@ impl OutputBuffer {
             let mut info_lines: Vec<&str> = log_n1.split('\n').collect();
 
             // Here's where we'll inject the live status
-            status_commits.insert(info_lines.len(), hash);
+            status_commits.insert(lines.len() + info_lines.len(), hash);
             info_lines.push("");
 
             let graph_line_deficit = info_lines.len() as isize - graph_lines.len() as isize;
@@ -256,5 +259,62 @@ impl OutputBuffer {
             output.write_all(&[b'\n'])?;
         }
         Ok(self.lines.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::str;
+    use std::{io::BufWriter, sync::Arc};
+
+    use googletest::{expect_that, prelude::eq};
+
+    use crate::{
+        git::test_utils::{TempRepo, WorktreeExt},
+        test_utils::some_time,
+    };
+
+    use super::*;
+
+    #[googletest::test]
+    #[test_log::test(tokio::test)]
+    async fn output_buffer_smoke() {
+        let repo = Arc::new(TempRepo::new().await.unwrap());
+        repo.commit("1", some_time()).await.unwrap();
+        let hash2 = repo.commit("2", some_time()).await.unwrap();
+        let hash3 = repo.commit("3", some_time()).await.unwrap();
+
+        let ob = OutputBuffer::new(&repo, format!("{hash2}^..HEAD"))
+            .await
+            .expect("failed to build OutputBuffer");
+        let statuses = HashMap::from([
+            (
+                hash3,
+                HashMap::from([
+                    ("my_test1".to_owned(), TestStatus::Enqueued),
+                    ("my_test2".to_owned(), TestStatus::Completed(0)),
+                ]),
+            ),
+            (
+                hash2,
+                HashMap::from([
+                    ("my_test1".to_owned(), TestStatus::Error("oh no".to_owned())),
+                    ("my_test2".to_owned(), TestStatus::Started),
+                ]),
+            ),
+        ]);
+
+        let mut buf = strip_ansi_escapes::Writer::new(BufWriter::new(Vec::new()));
+        ob.render(&mut buf, &statuses)
+            .expect("OutputBuffer::render failed");
+
+        // TODO: Find a way to deal with the "years ago" thing! Probably we should just make the
+        // decoration formatting configurable and then configure something here that is stable.
+        expect_that!(
+            str::from_utf8(&buf.into_inner().unwrap().into_inner().unwrap()).unwrap(),
+            eq("* 08e80af - (HEAD -> master) 3 (12 years ago) <Brendan Jackman>\n\
+                | my_test1: Enqueued my_test2: success \n\
+                * b29043f - 2 (12 years ago) <Brendan Jackman>\n\
+                | my_test1: oh no my_test2: Started \n"));
     }
 }

@@ -38,5 +38,5 @@ TODOS:
 My janky test command:
 
 ```
-RUST_LOG_STYLE=always RUST_LOG=debug cargo watch -- bash -c "cargo test --color=always -- |& less -R -F -c"
+FORCE_COLOR=1 RUST_LOG_STYLE=always RUST_LOG=debug cargo watch -- bash -c "cargo test --color=always -- |& less -R -F -c"
 ```
