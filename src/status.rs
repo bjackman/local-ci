@@ -9,6 +9,7 @@ use std::{
 
 use ansi_control_codes::control_sequences::{CPL, ED};
 use anyhow::{self, bail, Context as _};
+use colored::Colorize;
 use lazy_static::lazy_static;
 use regex::Regex;
 
@@ -65,9 +66,12 @@ impl<W: Worktree, O: Write> Tracker<W, O> {
             // ED is "erase display", which by default means cleareverything after the cursor.
             // The library we're using here doesn't seem to provide an obvious
             // way to just get at the bytes, other than formatting it.
-            write!(&mut self.output, "{}{}",
+            write!(
+                &mut self.output,
+                "{}{}",
                 CPL(Some(self.lines_to_clear as u32)),
-                ED(None))?;
+                ED(None)
+            )?;
         }
         self.lines_to_clear = self.output_buf.render(&mut self.output, &self.statuses)?;
         Ok(())
@@ -248,7 +252,20 @@ impl OutputBuffer {
                         // there's lifetime pain.
                         statuses.sort_by(|(name1, _), (name2, _)| name1.cmp(name2));
                         for (name, status) in statuses {
-                            output.write(format!("{name}: {status} ").as_bytes())?;
+                            output.write(
+                                format!(
+                                    "{}: {} ",
+                                    name.bold(),
+                                    match status {
+                                        TestStatus::Error(msg) => msg.on_bright_red(),
+                                        TestStatus::Completed(0) => "success".on_green(),
+                                        TestStatus::Completed(code) =>
+                                            format!("failed (status {code})").on_red(),
+                                        _ => status.to_string().into(),
+                                    }
+                                )
+                                .as_bytes(),
+                            )?;
                         }
                     }
                     None => {
