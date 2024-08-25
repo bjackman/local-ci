@@ -134,7 +134,7 @@ pub trait Worktree: Debug {
             .stdout;
         Ok(OsString::from_vec(stdout))
     }
-    
+
     async fn log_n1(&self, rev_spec: &OsStr, format_spec: &OsStr) -> anyhow::Result<OsString> {
         // TODO: De-duplicate!
         let mut cmd = Command::new("git");

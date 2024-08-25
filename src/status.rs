@@ -7,7 +7,6 @@ use std::{
 
 use anyhow::{self, bail, Context as _};
 use lazy_static::lazy_static;
-use log::debug;
 use regex::Regex;
 
 use crate::git::{CommitHash, Worktree};
