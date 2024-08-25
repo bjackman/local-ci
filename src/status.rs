@@ -18,7 +18,7 @@ pub struct Tracker<W: Worktree> {
 
 // This ought to be private to Tracker::reset, rust just doesn't seem to let you do that.
 lazy_static! {
-    static ref COMMIT_HASH_REGEX: Regex = Regex::new("[0-9a-z]+").unwrap();
+    static ref COMMIT_HASH_REGEX: Regex = Regex::new("[0-9a-z]{40,}").unwrap();
 }
 
 impl<W: Worktree> Tracker<W> {
@@ -61,7 +61,7 @@ impl<W: Worktree> Tracker<W> {
         // out the graph vertically to make space first.
 
         // This should eventually be configurable.
-        let log_format = "%h %d %s";
+        let log_format = "%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset";
 
         let graph_buf = self
             .repo

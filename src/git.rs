@@ -122,7 +122,7 @@ pub trait Worktree: Debug {
         let mut format_arg = OsString::from("--format=");
         format_arg.push(format_spec);
         let stdout = cmd
-            .args(["log", "--graph"])
+            .args(["log", "--graph", "--color=always"])
             .args([&format_arg, range_spec])
             .current_dir(self.path())
             .execute()
@@ -141,7 +141,7 @@ pub trait Worktree: Debug {
         let mut format_arg = OsString::from("--format=");
         format_arg.push(format_spec);
         let stdout = cmd
-            .args(["log", "-n1"])
+            .args(["log", "-n1", "--color=always"])
             .args([&format_arg, rev_spec])
             .current_dir(self.path())
             .execute()
