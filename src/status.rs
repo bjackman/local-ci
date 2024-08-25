@@ -332,4 +332,51 @@ mod tests {
                 * b29043f 2\n\
                 | my_test1: oh no my_test2: Started \n"));
     }
+
+    #[googletest::test]
+    #[test_log::test(tokio::test)]
+    async fn output_buffer_octopus() {
+        let _disable_colorize = DisableColorize::new();
+
+        let repo = Arc::new(TempRepo::new().await.unwrap());
+        let base_hash = repo.commit("base", some_time()).await.unwrap();
+        repo.commit("join", some_time()).await.unwrap();
+        let hash1 = repo.commit("1", some_time()).await.unwrap();
+        repo.checkout(&base_hash).await.unwrap();
+        let hash2 = repo.commit("2", some_time()).await.unwrap();
+        repo.checkout(&base_hash).await.unwrap();
+        let hash3 = repo.commit("3", some_time()).await.unwrap();
+        repo.merge(&[hash1, hash2.clone(), hash3.clone()], some_time()).await.unwrap();
+
+        let ob = OutputBuffer::new(&repo, format!("{base_hash}..HEAD"), "%h %s")
+            .await
+            .expect("failed to build OutputBuffer");
+        let statuses = HashMap::from([
+            (
+                hash3,
+                HashMap::from([
+                    ("my_test1".to_owned(), TestStatus::Enqueued),
+                    ("my_test2".to_owned(), TestStatus::Completed(0)),
+                ]),
+            ),
+            (
+                hash2,
+                HashMap::from([
+                    ("my_test1".to_owned(), TestStatus::Error("oh no".to_owned())),
+                    ("my_test2".to_owned(), TestStatus::Started),
+                ]),
+            ),
+        ]);
+
+        let mut buf = BufWriter::new(Vec::new());
+        ob.render(&mut buf, &statuses)
+            .expect("OutputBuffer::render failed");
+
+        expect_that!(
+            str::from_utf8(&buf.into_inner().unwrap()).unwrap(),
+            eq("* 08e80af 3\n\
+                | my_test1: Enqueued my_test2: success \n\
+                * b29043f 2\n\
+                | my_test1: oh no my_test2: Started \n"));
+    }
 }

@@ -152,7 +152,8 @@ pub trait Worktree: Debug {
             .await
             .context(format!(
                 "getting -n1 log for {:?} with format {:?}",
-                rev_spec.as_ref(), format_spec.as_ref(),
+                rev_spec.as_ref(),
+                format_spec.as_ref(),
             ))?
             .stdout;
         Ok(OsString::from_vec(stdout))
@@ -372,6 +373,22 @@ pub mod test_utils {
             let out_string =
                 String::from_utf8(output.stdout).context("reading git rev-parse output")?;
             Ok(Some(CommitHash(out_string.trim().to_owned())))
+        }
+
+        async fn merge(
+            &self,
+            parents: &[CommitHash],
+            timestamp: DateTime<Utc>,
+        ) -> anyhow::Result<()> {
+            let ts_is08601 = format!("{}", timestamp.format("%+"));
+            self.git(["merge", "-m", "merge commit"])
+                .args(parents)
+                .env("GIT_AUTHOR_DATE", ts_is08601.clone())
+                .env("GIT_COMMITTER_DATE", ts_is08601)
+                .execute()
+                .await
+                .context("'git commit' failed")?;
+            Ok(())
         }
     }
 
