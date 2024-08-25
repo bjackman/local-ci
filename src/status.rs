@@ -54,7 +54,7 @@ impl<W: Worktree, O: Write> Tracker<W, O> {
         let commit_statuses = self
             .statuses
             .entry(notif.test_case.hash.clone())
-            .or_insert(HashMap::new());
+            .or_default();
         commit_statuses.insert(notif.test_case.test_name.clone(), notif.status.clone());
     }
 
@@ -145,12 +145,12 @@ impl OutputBuffer {
         // TODO: do this without all the copying!
         let mut cur_chunk = String::new();
         let mut chunks = Vec::new();
-        for line in graph_buf.split("\n") {
+        for line in graph_buf.split('\n') {
             // --graph uses * to represent a node in the DAG.
-            if line.contains("*") && !cur_chunk.is_empty() {
+            if line.contains('*') && !cur_chunk.is_empty() {
                 chunks.push(mem::take(&mut cur_chunk));
             }
-            cur_chunk = cur_chunk + line;
+            cur_chunk += line;
         }
         chunks.push(cur_chunk);
 
@@ -182,14 +182,14 @@ impl OutputBuffer {
             // Git printed.
             let log_n1 = log_n1.strip_suffix('\n').unwrap_or(&log_n1);
 
-            let mut graph_lines: Vec<&str> = chunk.split("\n").collect();
+            let mut graph_lines: Vec<&str> = chunk.split('\n').collect();
 
             // We only want the graph bit, strip out the commit hash which we
             // only put in there as an anchor for this algorithm.
             graph_lines[0] = &graph_lines[0][..mattch.range().start];
 
             let extension_line;
-            let mut info_lines: Vec<&str> = log_n1.split("\n").collect();
+            let mut info_lines: Vec<&str> = log_n1.split('\n').collect();
 
             // Here's where we'll inject the live status
             status_commits.insert(info_lines.len(), hash);
@@ -207,7 +207,7 @@ impl OutputBuffer {
                 // lines here on the same line as the *? Ideally I should read
                 // the Git code but I CBA. I could at least graph the whole
                 // Linux kernel history and see if it ever arises there.
-                extension_line = graph_lines[0].replace("*", "|");
+                extension_line = graph_lines[0].replace('*', "|");
                 for _ in 0..graph_line_deficit {
                     graph_lines.insert(1, &extension_line);
                 }
@@ -240,16 +240,16 @@ impl OutputBuffer {
         statuses: &HashMap<CommitHash, HashMap<String, TestStatus>>,
     ) -> anyhow::Result<usize> {
         for (i, line) in self.lines.iter().enumerate() {
-            output.write(line.as_bytes())?;
+            output.write_all(line.as_bytes())?;
             if let Some(hash) = self.status_commits.get(&i) {
-                match statuses.get(&hash) {
+                match statuses.get(hash) {
                     Some(statuses) => {
                         let mut statuses: Vec<(&String, &TestStatus)> = statuses.iter().collect();
                         // Sort by test case name. Would like sort_by_key here but
                         // there's lifetime pain.
                         statuses.sort_by(|(name1, _), (name2, _)| name1.cmp(name2));
                         for (name, status) in statuses {
-                            output.write(
+                            output.write_all(
                                 format!(
                                     "{}: {} ",
                                     name.bold(),
@@ -266,11 +266,11 @@ impl OutputBuffer {
                         }
                     }
                     None => {
-                        output.write(format!("UNKNOWN").as_bytes())?;
+                        output.write_all("UNKNOWN".as_bytes())?;
                     }
                 }
             }
-            output.write(&[b'\n'])?;
+            output.write_all(&[b'\n'])?;
         }
         Ok(self.lines.len())
     }
