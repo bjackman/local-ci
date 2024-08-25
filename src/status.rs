@@ -38,7 +38,11 @@ impl<W: Worktree, O: Write> Tracker<W, O> {
     }
 
     pub async fn set_range(&mut self, range_spec: &OsStr) -> anyhow::Result<()> {
-        self.output_buf = OutputBuffer::new(&self.repo, range_spec).await?;
+        // This should eventually be configurable.
+        let log_format =
+            "%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset";
+
+        self.output_buf = OutputBuffer::new(&self.repo, range_spec, log_format).await?;
         Ok(())
     }
 
@@ -87,6 +91,7 @@ impl OutputBuffer {
     pub async fn new<W: Worktree, S: AsRef<OsStr>>(
         repo: &Arc<W>,
         range_spec: S,
+        log_format: &str,
     ) -> anyhow::Result<Self> {
         // All right this is gonna seem pretty hacky. We're gonna get the --graph log
         // as a text blob, then we're gonna use our pre-existing knowledge about
@@ -120,10 +125,6 @@ impl OutputBuffer {
         // chunk, we can just append those lines onto the lines of the graph
         // buffer pairwise. If it has more lines then we will need to stretch
         // out the graph vertically to make space first.
-
-        // This should eventually be configurable.
-        let log_format =
-            "%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset";
 
         let graph_buf = repo
             .log_graph(range_spec.as_ref(), "%H\n")
@@ -283,7 +284,7 @@ mod tests {
         let hash2 = repo.commit("2", some_time()).await.unwrap();
         let hash3 = repo.commit("3", some_time()).await.unwrap();
 
-        let ob = OutputBuffer::new(&repo, format!("{hash2}^..HEAD"))
+        let ob = OutputBuffer::new(&repo, format!("{hash2}^..HEAD"), "%h %s")
             .await
             .expect("failed to build OutputBuffer");
         let statuses = HashMap::from([
@@ -307,13 +308,11 @@ mod tests {
         ob.render(&mut buf, &statuses)
             .expect("OutputBuffer::render failed");
 
-        // TODO: Find a way to deal with the "years ago" thing! Probably we should just make the
-        // decoration formatting configurable and then configure something here that is stable.
         expect_that!(
             str::from_utf8(&buf.into_inner().unwrap().into_inner().unwrap()).unwrap(),
-            eq("* 08e80af - (HEAD -> master) 3 (12 years ago) <Brendan Jackman>\n\
+            eq("* 08e80af 3\n\
                 | my_test1: Enqueued my_test2: success \n\
-                * b29043f - 2 (12 years ago) <Brendan Jackman>\n\
+                * b29043f 2\n\
                 | my_test1: oh no my_test2: Started \n"));
     }
 }
