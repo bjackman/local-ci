@@ -1,7 +1,9 @@
 use std::{
+    collections::HashMap,
     ffi::OsStr,
-    io::{stdout, Write as _},
+    io::{stdout, Write},
     mem,
+    process::Output,
     sync::Arc,
 };
 
@@ -9,10 +11,14 @@ use anyhow::{self, bail, Context as _};
 use lazy_static::lazy_static;
 use regex::Regex;
 
-use crate::git::{CommitHash, Worktree};
+use crate::{
+    git::{CommitHash, Worktree},
+    test::TestStatus,
+};
 
 pub struct Tracker<W: Worktree> {
     repo: Arc<W>,
+    output_buf: OutputBuffer,
 }
 
 // This ought to be private to Tracker::reset, rust just doesn't seem to let you do that.
@@ -22,10 +28,45 @@ lazy_static! {
 
 impl<W: Worktree> Tracker<W> {
     pub fn new(repo: Arc<W>) -> Self {
-        Self { repo }
+        Self {
+            repo,
+            output_buf: OutputBuffer::empty(),
+        }
     }
 
-    pub async fn reset(&self, range_spec: &OsStr, _revs: &Vec<CommitHash>) -> anyhow::Result<()> {
+    pub async fn reset(
+        &mut self,
+        range_spec: &OsStr,
+        revs: &Vec<CommitHash>,
+    ) -> anyhow::Result<()> {
+        self.output_buf = OutputBuffer::new(&self.repo, range_spec, revs).await?;
+        self.output_buf.render(&stdout(), &HashMap::new())?;
+        Ok(())
+    }
+}
+
+// Represents the buffer showing the current status of all the commits being tested.
+struct OutputBuffer {
+    // Pre-rendered lines containing static information (graph, commit log info etc).
+    lines: Vec<String>,
+    // lines[i] should be appended with the live status information of tests for status_commit[i].
+    status_commits: HashMap<usize, CommitHash>,
+}
+
+impl OutputBuffer {
+    // TODO use Default instead?
+    pub fn empty() -> Self {
+        Self {
+            lines: Vec::new(),
+            status_commits: HashMap::new(),
+        }
+    }
+
+    pub async fn new<W: Worktree>(
+        repo: &Arc<W>,
+        range_spec: &OsStr,
+        _revs: &Vec<CommitHash>,
+    ) -> anyhow::Result<Self> {
         // All right this is gonna seem pretty hacky. We're gonna get the --graph log
         // as a text blob, then we're gonna use our pre-existing knowledge about
         // its contents as position anchors to patch it with the information we need.
@@ -60,10 +101,10 @@ impl<W: Worktree> Tracker<W> {
         // out the graph vertically to make space first.
 
         // This should eventually be configurable.
-        let log_format = "%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset";
+        let log_format =
+            "%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset";
 
-        let graph_buf = self
-            .repo
+        let graph_buf = repo
             // TODO: Get rid of explicit OsStr::new everywhere.
             .log_graph(range_spec, OsStr::new("%H\n"))
             .await?
@@ -83,7 +124,8 @@ impl<W: Worktree> Tracker<W> {
         }
         chunks.push(cur_chunk);
 
-        let mut output = Vec::<u8>::new();
+        let mut lines = Vec::new();
+        let mut status_commits = HashMap::new();
         for chunk in chunks {
             // The commit hash should be the only alphanumeric sequence in
             // the chunk.
@@ -98,8 +140,7 @@ impl<W: Worktree> Tracker<W> {
             let mattch = matches.first().unwrap();
             let hash = CommitHash(mattch.as_str().to_owned());
 
-            let log_n1_os = self
-                .repo
+            let log_n1_os = repo
                 .log_n1(OsStr::new(&hash), OsStr::new(&log_format))
                 .await
                 .context(format!("couldn't get commit data for {:?}", hash))?;
@@ -119,7 +160,11 @@ impl<W: Worktree> Tracker<W> {
 
             let extension_line;
             let mut info_lines: Vec<&str> = log_n1.split("\n").collect();
-            info_lines.push("DA INFO");
+
+            // Here's where we'll inject the live status
+            status_commits.insert(info_lines.len(), hash);
+            info_lines.push("");
+
             let graph_line_deficit = info_lines.len() as isize - graph_lines.len() as isize;
             if graph_line_deficit > 0 {
                 // We assume that the first line of the chunk will contain an
@@ -141,19 +186,34 @@ impl<W: Worktree> Tracker<W> {
                 info_lines.append(&mut vec![""; -graph_line_deficit as usize]);
             }
             assert_eq!(info_lines.len(), graph_lines.len());
-            output.append(
+
+            lines.append(
                 &mut graph_lines
                     .iter()
                     .zip(info_lines.iter())
                     .map(|(graph, info)| (*graph).to_owned() + *info)
                     // TODO: can we get rid of the collect and just call .join on the map iterator?
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    .into_bytes(),
+                    .collect::<Vec<_>>(),
             );
-            output.push(b'\n');
         }
-        stdout().write(&output).context("couldn't write stdout")?;
+        Ok(Self { lines, status_commits, })
+    }
+
+    fn render(
+        &self,
+        mut output: impl Write,
+        statuses: &HashMap<CommitHash, TestStatus>,
+    ) -> anyhow::Result<()> {
+        for (i, line) in self.lines.iter().enumerate() {
+            output.write(line.as_bytes())?;
+            if let Some(hash) = self.status_commits.get(&i) {
+                if let Some(status) = statuses.get(&hash) {
+                    output.write(format!("{status:?}").as_bytes())?;
+                }
+                output.write(format!("UNKNOWN").as_bytes())?;
+            }
+            output.write(&[b'\n'])?;
+        }
         Ok(())
     }
 }

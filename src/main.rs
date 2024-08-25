@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let mut test_manager = manager_builder.build().await?;
     let range_spec: OsString = format!("{}..HEAD", args.base).into();
     let mut results = test_manager.results();
-    let status_tracker = status::Tracker::new(repo.clone());
+    let mut status_tracker = status::Tracker::new(repo.clone());
     let mut revs_stream = repo.watch_refs(&range_spec)?;
     let mut revs_stream = pin!(revs_stream);
     loop {
