@@ -118,13 +118,10 @@ pub trait Worktree: Debug {
     }
 
     async fn log_graph(&self, range_spec: &OsStr, format_spec: &OsStr) -> anyhow::Result<OsString> {
-        let mut cmd = Command::new("git");
         let mut format_arg = OsString::from("--format=");
         format_arg.push(format_spec);
-        let stdout = cmd
-            .args(["log", "--graph", "--color=always"])
+        let stdout = self.git(["log", "--graph", "--color=always"])
             .args([&format_arg, range_spec])
-            .current_dir(self.path())
             .execute()
             .await
             .context(format!(
@@ -136,14 +133,10 @@ pub trait Worktree: Debug {
     }
 
     async fn log_n1(&self, rev_spec: &OsStr, format_spec: &OsStr) -> anyhow::Result<OsString> {
-        // TODO: De-duplicate!
-        let mut cmd = Command::new("git");
         let mut format_arg = OsString::from("--format=");
         format_arg.push(format_spec);
-        let stdout = cmd
-            .args(["log", "-n1", "--color=always"])
+        let stdout = self.git(["log", "-n1", "--color=always"])
             .args([&format_arg, rev_spec])
-            .current_dir(self.path())
             .execute()
             .await
             .context(format!(
