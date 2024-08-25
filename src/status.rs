@@ -131,7 +131,6 @@ impl OutputBuffer {
             .into_string()
             .map_err(|_err| anyhow::anyhow!("got non-utf8 output from git log"))?;
 
-        // TODO: do this without all the copying!
         let mut cur_chunk = String::new();
         let mut chunks = Vec::new();
         for line in graph_buf.split('\n') {
