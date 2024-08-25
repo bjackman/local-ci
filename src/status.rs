@@ -125,8 +125,7 @@ impl OutputBuffer {
             "%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset";
 
         let graph_buf = repo
-            // TODO: Get rid of explicit OsStr::new everywhere.
-            .log_graph(range_spec.as_ref(), OsStr::new("%H\n"))
+            .log_graph(range_spec.as_ref(), "%H\n")
             .await?
             // OsStr doesn't have a proper API, luckily we can expect utf-8.
             .into_string()
@@ -161,7 +160,7 @@ impl OutputBuffer {
             let hash = CommitHash(mattch.as_str().to_owned());
 
             let log_n1_os = repo
-                .log_n1(OsStr::new(&hash), OsStr::new(&log_format))
+                .log_n1(&hash, log_format)
                 .await
                 .context(format!("couldn't get commit data for {:?}", hash))?;
             // Hack: because OsStr doesn't have a proper API, luckily we can

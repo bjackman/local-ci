@@ -117,31 +117,42 @@ pub trait Worktree: Debug {
             ))
     }
 
-    async fn log_graph(&self, range_spec: &OsStr, format_spec: &OsStr) -> anyhow::Result<OsString> {
+    async fn log_graph<S, T>(&self, range_spec: S, format_spec: T) -> anyhow::Result<OsString>
+    where
+        S: AsRef<OsStr>,
+        T: AsRef<OsStr>,
+    {
         let mut format_arg = OsString::from("--format=");
-        format_arg.push(format_spec);
-        let stdout = self.git(["log", "--graph", "--color=always"])
-            .args([&format_arg, range_spec])
+        format_arg.push(format_spec.as_ref());
+        let stdout = self
+            .git(["log", "--graph", "--color=always"])
+            .args([&format_arg, range_spec.as_ref()])
             .execute()
             .await
             .context(format!(
                 "getting graph log for {:?} with format {:?}",
-                range_spec, format_spec,
+                range_spec.as_ref(),
+                format_spec.as_ref(),
             ))?
             .stdout;
         Ok(OsString::from_vec(stdout))
     }
 
-    async fn log_n1(&self, rev_spec: &OsStr, format_spec: &OsStr) -> anyhow::Result<OsString> {
+    async fn log_n1<S, T>(&self, rev_spec: S, format_spec: T) -> anyhow::Result<OsString>
+    where
+        S: AsRef<OsStr>,
+        T: AsRef<OsStr>,
+    {
         let mut format_arg = OsString::from("--format=");
-        format_arg.push(format_spec);
-        let stdout = self.git(["log", "-n1", "--color=always"])
-            .args([&format_arg, rev_spec])
+        format_arg.push(format_spec.as_ref());
+        let stdout = self
+            .git(["log", "-n1", "--color=always"])
+            .args([&format_arg, rev_spec.as_ref()])
             .execute()
             .await
             .context(format!(
                 "getting -n1 log for {:?} with format {:?}",
-                rev_spec, format_spec,
+                rev_spec.as_ref(), format_spec.as_ref(),
             ))?
             .stdout;
         Ok(OsString::from_vec(stdout))
@@ -317,7 +328,11 @@ pub mod test_utils {
     pub trait WorktreeExt: Worktree {
         // timestamp is used for both committer and author. This ought to make
         // commit hashes deterministic.
-        async fn commit<S>(&self, message: S, timestamp: DateTime<Utc>) -> anyhow::Result<CommitHash>
+        async fn commit<S>(
+            &self,
+            message: S,
+            timestamp: DateTime<Utc>,
+        ) -> anyhow::Result<CommitHash>
         where
             S: AsRef<OsStr>,
         {
@@ -360,7 +375,7 @@ pub mod test_utils {
         }
     }
 
-    impl<W: Worktree> WorktreeExt for W { }
+    impl<W: Worktree> WorktreeExt for W {}
 }
 
 #[cfg(test)]
