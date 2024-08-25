@@ -276,9 +276,26 @@ mod tests {
 
     use super::*;
 
+    struct DisableColorize {}
+
+    impl DisableColorize {
+        fn new() -> Self {
+            colored::control::set_override(false);
+            Self {}
+        }
+    }
+
+    impl Drop for DisableColorize {
+        fn drop(&mut self) {
+            colored::control::unset_override();
+        }
+    }
+
     #[googletest::test]
     #[test_log::test(tokio::test)]
     async fn output_buffer_smoke() {
+        let _disable_colorize = DisableColorize::new();
+
         let repo = Arc::new(TempRepo::new().await.unwrap());
         repo.commit("1", some_time()).await.unwrap();
         let hash2 = repo.commit("2", some_time()).await.unwrap();
@@ -304,12 +321,12 @@ mod tests {
             ),
         ]);
 
-        let mut buf = strip_ansi_escapes::Writer::new(BufWriter::new(Vec::new()));
+        let mut buf = BufWriter::new(Vec::new());
         ob.render(&mut buf, &statuses)
             .expect("OutputBuffer::render failed");
 
         expect_that!(
-            str::from_utf8(&buf.into_inner().unwrap().into_inner().unwrap()).unwrap(),
+            str::from_utf8(&buf.into_inner().unwrap()).unwrap(),
             eq("* 08e80af 3\n\
                 | my_test1: Enqueued my_test2: success \n\
                 * b29043f 2\n\
