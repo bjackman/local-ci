@@ -4,6 +4,7 @@ use futures::StreamExt;
 use log::info;
 use tokio_util::sync::CancellationToken;
 use std::ffi::OsString;
+use std::io::stdout;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
@@ -92,8 +93,8 @@ async fn main() -> anyhow::Result<()> {
         .worktree_dir(&args.worktree_dir);
     let mut test_manager = manager_builder.build().await?;
     let range_spec: OsString = format!("{}..HEAD", args.base).into();
-    let mut results = test_manager.results();
-    let mut status_tracker = status::Tracker::new(repo.clone());
+    let mut notifs = test_manager.results();
+    let mut status_tracker = status::Tracker::new(repo.clone(), stdout());
     let mut revs_stream = repo.watch_refs(&range_spec)?;
     let mut revs_stream = pin!(revs_stream);
     loop {
@@ -107,14 +108,14 @@ async fn main() -> anyhow::Result<()> {
                 // (mostly just kicks off background stuff) before awaiting the
                 // status tracker reset (does synchronhous work).
                 test_manager.set_revisions(revs.clone())?;
-                status_tracker.reset(&range_spec, &revs).await.context("resetting status tracker")?;
+                status_tracker.set_range(&range_spec, &revs).await.context("resetting status tracker")?;
             },
-            result = results.recv() => {
+            notif = notifs.recv() => {
                 // https://github.com/rust-lang/futures-rs/issues/1857
                 // AFAICS there is no way to encode a stream that never terminates.
-                let _result = result.expect("result stream terminated");
-                // TODO: What the fucking fuck???? I should have used Perl.
-                // println!("{:?}", result);
+                let notif = notif.expect("notification stream terminated");
+                status_tracker.update(notif);
+                status_tracker.repaint().context("error painting status to stdout")?;
             },
             _ =  cancellation_token.cancelled() => {
                 info!("Got shutdown signal, terminating jobs and waiting");

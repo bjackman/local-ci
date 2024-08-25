@@ -430,7 +430,7 @@ impl TestJob {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct TestCase {
     pub hash: CommitHash,
-    test_name: String,
+    pub test_name: String,
 }
 pub type ExitCode = i32;
 

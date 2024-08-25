@@ -13,12 +13,15 @@ use regex::Regex;
 
 use crate::{
     git::{CommitHash, Worktree},
-    test::TestStatus,
+    test::{Notification, TestStatus},
 };
 
-pub struct Tracker<W: Worktree> {
+pub struct Tracker<W: Worktree, O: Write> {
     repo: Arc<W>,
+    // Inner string key is test name.
+    statuses: HashMap<CommitHash, HashMap<String, TestStatus>>,
     output_buf: OutputBuffer,
+    output: O,
 }
 
 // This ought to be private to Tracker::reset, rust just doesn't seem to let you do that.
@@ -26,22 +29,35 @@ lazy_static! {
     static ref COMMIT_HASH_REGEX: Regex = Regex::new("[0-9a-z]{40,}").unwrap();
 }
 
-impl<W: Worktree> Tracker<W> {
-    pub fn new(repo: Arc<W>) -> Self {
+impl<W: Worktree, O: Write> Tracker<W, O> {
+    pub fn new(repo: Arc<W>, output: O) -> Self {
         Self {
             repo,
+            statuses: HashMap::new(),
             output_buf: OutputBuffer::empty(),
+            output,
         }
     }
 
-    pub async fn reset(
+    pub async fn set_range(
         &mut self,
         range_spec: &OsStr,
         revs: &Vec<CommitHash>,
     ) -> anyhow::Result<()> {
         self.output_buf = OutputBuffer::new(&self.repo, range_spec, revs).await?;
-        self.output_buf.render(&stdout(), &HashMap::new())?;
         Ok(())
+    }
+
+    pub fn update(&mut self, notif: Arc<Notification>) {
+        let commit_statuses = self
+            .statuses
+            .entry(notif.test_case.hash.clone())
+            .or_insert(HashMap::new());
+        commit_statuses.insert(notif.test_case.test_name.clone(), notif.status.clone());
+    }
+
+    pub fn repaint(&mut self) -> anyhow::Result<()> {
+        self.output_buf.render(&mut self.output, &self.statuses)
     }
 }
 
@@ -196,21 +212,35 @@ impl OutputBuffer {
                     .collect::<Vec<_>>(),
             );
         }
-        Ok(Self { lines, status_commits, })
+        Ok(Self {
+            lines,
+            status_commits,
+        })
     }
 
+    // TODO: Use AsyncWrite.
     fn render(
         &self,
-        mut output: impl Write,
-        statuses: &HashMap<CommitHash, TestStatus>,
+        output: &mut impl Write,
+        statuses: &HashMap<CommitHash, HashMap<String, TestStatus>>,
     ) -> anyhow::Result<()> {
         for (i, line) in self.lines.iter().enumerate() {
             output.write(line.as_bytes())?;
             if let Some(hash) = self.status_commits.get(&i) {
-                if let Some(status) = statuses.get(&hash) {
-                    output.write(format!("{status:?}").as_bytes())?;
+                match statuses.get(&hash) {
+                    Some(statuses) => {
+                        let mut statuses: Vec<(&String, &TestStatus)> = statuses.iter().collect();
+                        // Sort by test case name. Would like sort_by_key here but
+                        // there's lifetime pain.
+                        statuses.sort_by(|(name1, _), (name2, _)| name1.cmp(name2));
+                        for (name, status) in statuses {
+                            output.write(format!("{name}: {status} ").as_bytes())?;
+                        }
+                    }
+                    None => {
+                        output.write(format!("UNKNOWN").as_bytes())?;
+                    }
                 }
-                output.write(format!("UNKNOWN").as_bytes())?;
             }
             output.write(&[b'\n'])?;
         }
