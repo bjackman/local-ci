@@ -1,9 +1,8 @@
 use std::{
     collections::HashMap,
     ffi::OsStr,
-    io::{stdout, Write},
+    io::{Write},
     mem,
-    process::Output,
     sync::Arc,
 };
 
