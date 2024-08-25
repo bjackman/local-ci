@@ -23,6 +23,7 @@ pub struct Tracker<W: Worktree, O: Write> {
 // This ought to be private to Tracker::reset, rust just doesn't seem to let you do that.
 lazy_static! {
     static ref COMMIT_HASH_REGEX: Regex = Regex::new("[0-9a-z]{40,}").unwrap();
+    static ref GRAPH_COMPONENT_REGEX: Regex = Regex::new(r"[\\/*]").unwrap();
 }
 
 impl<W: Worktree, O: Write> Tracker<W, O> {
@@ -191,11 +192,12 @@ impl OutputBuffer {
                 // vertical lines and then add a new vertical lines pointing up
                 // to the asterisk.
                 //
-                // TODO: Is there any situation where Git actually uses diagonal
-                // lines here on the same line as the *? Ideally I should read
-                // the Git code but I CBA. I could at least graph the whole
-                // Linux kernel history and see if it ever arises there.
-                extension_line = graph_lines[0].replace('*', "|");
+                // I checked and it is in fact possible to have non-vertical
+                // lines on the same line as the asterisk. E.g. check the linux
+                // kernel history, search back to commit 578cc98b66f5a5 and you
+                // will see it. So we need to replace diagnoals with verticals
+                // too.
+                extension_line = GRAPH_COMPONENT_REGEX.replace_all(graph_lines[0], "|");
                 for _ in 0..graph_line_deficit {
                     graph_lines.insert(1, &extension_line);
                 }
