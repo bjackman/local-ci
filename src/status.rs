@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{self, bail, Context as _};
 use lazy_static::lazy_static;
+use log::debug;
 use regex::Regex;
 
 use crate::git::{CommitHash, Worktree};
@@ -65,7 +66,7 @@ impl<W: Worktree> Tracker<W> {
         let graph_buf = self
             .repo
             // TODO: Get rid of explicit OsStr::new everywhere.
-            .log_graph(range_spec, OsStr::new("%H"))
+            .log_graph(range_spec, OsStr::new("%H\n"))
             .await?
             // OsStr doesn't have a proper API, luckily we can expect utf-8.
             .into_string()
@@ -79,7 +80,7 @@ impl<W: Worktree> Tracker<W> {
             if line.contains("*") && !cur_chunk.is_empty() {
                 chunks.push(mem::take(&mut cur_chunk));
             }
-            cur_chunk = cur_chunk + line + "\n";
+            cur_chunk = cur_chunk + line;
         }
         chunks.push(cur_chunk);
 
@@ -95,7 +96,8 @@ impl<W: Worktree> Tracker<W> {
                     chunk
                 );
             }
-            let hash = CommitHash(matches.first().unwrap().as_str().to_owned());
+            let mattch = matches.first().unwrap();
+            let hash = CommitHash(mattch.as_str().to_owned());
 
             let log_n1_os = self
                 .repo
@@ -106,18 +108,40 @@ impl<W: Worktree> Tracker<W> {
             // just squash to utf-8, sorry users.
             let log_n1 = log_n1_os.to_string_lossy();
 
-            let graph_lines: Vec<&str> = chunk.split("\n").collect();
+            // We're gonna add our own newlines in so we don't need the one that
+            // Git printed.
+            let log_n1 = log_n1.strip_suffix('\n').unwrap_or(&log_n1);
+
+            let mut graph_lines: Vec<&str> = chunk.split("\n").collect();
+
+            // We only want the graph bit, strip out the commit hash which we
+            // only put in there as an anchor for this algorithm.
+            graph_lines[0] = &graph_lines[0][..mattch.range().start];
+
+            let extension_line;
             let mut info_lines: Vec<&str> = log_n1.split("\n").collect();
+            info_lines.push("DA INFO");
             let graph_line_deficit = info_lines.len() as isize - graph_lines.len() as isize;
             if graph_line_deficit > 0 {
-                panic!(
-                    "TODO: vertically stretch graph ({:?} vs {:?})",
-                    graph_lines, info_lines
-                )
+                // We assume that the first line of the chunk will contain an
+                // asterisk identifying the current commit, and some vertical
+                // lines continuing up to the previous chunk. We just copy those
+                // vertical lines and then add a new vertical lines pointing up
+                // to the asterisk.
+                //
+                // TODO: Is there any situation where Git actually uses diagonal
+                // lines here on the same line as the *? Ideally I should read
+                // the Git code but I CBA. I could at least graph the whole
+                // Linux kernel history and see if it ever arises there.
+                extension_line = graph_lines[0].replace("*", "|");
+                for _ in 0..graph_line_deficit {
+                    graph_lines.insert(1, &extension_line);
+                }
             } else {
                 // Append empty entries to the info lines so that the zip below works nicely.
                 info_lines.append(&mut vec![""; -graph_line_deficit as usize]);
             }
+            assert_eq!(info_lines.len(), graph_lines.len());
             output.append(
                 &mut graph_lines
                     .iter()
@@ -128,9 +152,9 @@ impl<W: Worktree> Tracker<W> {
                     .join("\n")
                     .into_bytes(),
             );
+            output.push(b'\n');
         }
         stdout().write(&output).context("couldn't write stdout")?;
-        println!("next");
         Ok(())
     }
 }
