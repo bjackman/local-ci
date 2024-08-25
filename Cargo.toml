@@ -27,6 +27,7 @@ chrono = "0.4.38"
 directories = "5.0.1"
 regex = "1.10.6"
 lazy_static = "1.5.0"
+ansi-control-codes = "1.0.1"
 
 [dev-dependencies]
 test-case = "3.3"

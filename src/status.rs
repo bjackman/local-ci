@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use ansi_control_codes::control_sequences::{CPL, ED};
 use anyhow::{self, bail, Context as _};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -22,6 +23,7 @@ pub struct Tracker<W: Worktree, O: Write> {
     statuses: HashMap<CommitHash, HashMap<String, TestStatus>>,
     output_buf: OutputBuffer,
     output: O,
+    lines_to_clear: usize,
 }
 
 // This ought to be private to Tracker::reset, rust just doesn't seem to let you do that.
@@ -36,6 +38,7 @@ impl<W: Worktree, O: Write> Tracker<W, O> {
             statuses: HashMap::new(),
             output_buf: OutputBuffer::empty(),
             output,
+            lines_to_clear: 0,
         }
     }
 
@@ -57,7 +60,17 @@ impl<W: Worktree, O: Write> Tracker<W, O> {
     }
 
     pub fn repaint(&mut self) -> anyhow::Result<()> {
-        self.output_buf.render(&mut self.output, &self.statuses)
+        if self.lines_to_clear != 0 {
+            // CPL is "cursor previous line" i.e. move the cursor up N lines.
+            // ED is "erase display", which by default means cleareverything after the cursor.
+            // The library we're using here doesn't seem to provide an obvious
+            // way to just get at the bytes, other than formatting it.
+            write!(&mut self.output, "{}{}",
+                CPL(Some(self.lines_to_clear as u32)),
+                ED(None))?;
+        }
+        self.lines_to_clear = self.output_buf.render(&mut self.output, &self.statuses)?;
+        Ok(())
     }
 }
 
@@ -218,12 +231,13 @@ impl OutputBuffer {
         })
     }
 
+    // Returns number of lines that were written.
     // TODO: Use AsyncWrite.
     fn render(
         &self,
         output: &mut impl Write,
         statuses: &HashMap<CommitHash, HashMap<String, TestStatus>>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         for (i, line) in self.lines.iter().enumerate() {
             output.write(line.as_bytes())?;
             if let Some(hash) = self.status_commits.get(&i) {
@@ -244,6 +258,6 @@ impl OutputBuffer {
             }
             output.write(&[b'\n'])?;
         }
-        Ok(())
+        Ok(self.lines.len())
     }
 }

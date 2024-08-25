@@ -42,6 +42,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ansi-control-codes"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fea32e0d6400b50c211ad0d63de1623da597e9f8d9a7280dfe54e83f5216b3a"
+
+[[package]]
 name = "anstream"
 version = "0.6.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -651,6 +657,7 @@ checksum = "78b3ae25bc7c8c38cec158d1f2757ee79e9b3740fbc7ccf0e59e4b08d793fa89"
 name = "local-ci"
 version = "0.1.0"
 dependencies = [
+ "ansi-control-codes",
  "anyhow",
  "async-condvar-fair",
  "async-stream",
