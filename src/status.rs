@@ -76,7 +76,6 @@ struct OutputBuffer {
 }
 
 impl OutputBuffer {
-    // TODO use Default instead?
     pub fn empty() -> Self {
         Self {
             lines: Vec::new(),
