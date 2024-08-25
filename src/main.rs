@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
                 // (mostly just kicks off background stuff) before awaiting the
                 // status tracker reset (does synchronhous work).
                 test_manager.set_revisions(revs.clone())?;
-                status_tracker.set_range(&range_spec, &revs).await.context("resetting status tracker")?;
+                status_tracker.set_range(&range_spec).await.context("resetting status tracker")?;
             },
             notif = notifs.recv() => {
                 // https://github.com/rust-lang/futures-rs/issues/1857

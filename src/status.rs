@@ -46,9 +46,8 @@ impl<W: Worktree, O: Write> Tracker<W, O> {
     pub async fn set_range(
         &mut self,
         range_spec: &OsStr,
-        revs: &Vec<CommitHash>,
     ) -> anyhow::Result<()> {
-        self.output_buf = OutputBuffer::new(&self.repo, range_spec, revs).await?;
+        self.output_buf = OutputBuffer::new(&self.repo, range_spec).await?;
         Ok(())
     }
 
@@ -98,7 +97,6 @@ impl OutputBuffer {
     pub async fn new<W: Worktree>(
         repo: &Arc<W>,
         range_spec: &OsStr,
-        _revs: &Vec<CommitHash>,
     ) -> anyhow::Result<Self> {
         // All right this is gonna seem pretty hacky. We're gonna get the --graph log
         // as a text blob, then we're gonna use our pre-existing knowledge about
