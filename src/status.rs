@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    ffi::OsStr,
-    io::{Write},
-    mem,
-    sync::Arc,
-};
+use std::{collections::HashMap, ffi::OsStr, io::Write, mem, sync::Arc};
 
 use ansi_control_codes::control_sequences::{CPL, ED};
 use anyhow::{self, bail, Context as _};
@@ -42,10 +36,7 @@ impl<W: Worktree, O: Write> Tracker<W, O> {
         }
     }
 
-    pub async fn set_range(
-        &mut self,
-        range_spec: &OsStr,
-    ) -> anyhow::Result<()> {
+    pub async fn set_range(&mut self, range_spec: &OsStr) -> anyhow::Result<()> {
         self.output_buf = OutputBuffer::new(&self.repo, range_spec).await?;
         Ok(())
     }
@@ -93,10 +84,7 @@ impl OutputBuffer {
         }
     }
 
-    pub async fn new<W: Worktree>(
-        repo: &Arc<W>,
-        range_spec: &OsStr,
-    ) -> anyhow::Result<Self> {
+    pub async fn new<W: Worktree>(repo: &Arc<W>, range_spec: &OsStr) -> anyhow::Result<Self> {
         // All right this is gonna seem pretty hacky. We're gonna get the --graph log
         // as a text blob, then we're gonna use our pre-existing knowledge about
         // its contents as position anchors to patch it with the information we need.
@@ -242,31 +230,26 @@ impl OutputBuffer {
         for (i, line) in self.lines.iter().enumerate() {
             output.write_all(line.as_bytes())?;
             if let Some(hash) = self.status_commits.get(&i) {
-                match statuses.get(hash) {
-                    Some(statuses) => {
-                        let mut statuses: Vec<(&String, &TestStatus)> = statuses.iter().collect();
-                        // Sort by test case name. Would like sort_by_key here but
-                        // there's lifetime pain.
-                        statuses.sort_by(|(name1, _), (name2, _)| name1.cmp(name2));
-                        for (name, status) in statuses {
-                            output.write_all(
-                                format!(
-                                    "{}: {} ",
-                                    name.bold(),
-                                    match status {
-                                        TestStatus::Error(msg) => msg.on_bright_red(),
-                                        TestStatus::Completed(0) => "success".on_green(),
-                                        TestStatus::Completed(code) =>
-                                            format!("failed (status {code})").on_red(),
-                                        _ => status.to_string().into(),
-                                    }
-                                )
-                                .as_bytes(),
-                            )?;
-                        }
-                    }
-                    None => {
-                        output.write_all("UNKNOWN".as_bytes())?;
+                if let Some(statuses) = statuses.get(hash) {
+                    let mut statuses: Vec<(&String, &TestStatus)> = statuses.iter().collect();
+                    // Sort by test case name. Would like sort_by_key here but
+                    // there's lifetime pain.
+                    statuses.sort_by(|(name1, _), (name2, _)| name1.cmp(name2));
+                    for (name, status) in statuses {
+                        output.write_all(
+                            format!(
+                                "{}: {} ",
+                                name.bold(),
+                                match status {
+                                    TestStatus::Error(msg) => msg.on_bright_red(),
+                                    TestStatus::Completed(0) => "success".on_green(),
+                                    TestStatus::Completed(code) =>
+                                        format!("failed (status {code})").on_red(),
+                                    _ => status.to_string().into(),
+                                }
+                            )
+                            .as_bytes(),
+                        )?;
                     }
                 }
             }
