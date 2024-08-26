@@ -267,6 +267,7 @@ mod tests {
     use core::str;
     use std::{io::BufWriter, sync::Arc};
 
+    use colored::control::SHOULD_COLORIZE;
     use googletest::{expect_that, prelude::eq};
 
     use crate::{
@@ -280,14 +281,14 @@ mod tests {
 
     impl DisableColorize {
         fn new() -> Self {
-            colored::control::set_override(false);
+            SHOULD_COLORIZE.set_override(false);
             Self {}
         }
     }
 
     impl Drop for DisableColorize {
         fn drop(&mut self) {
-            colored::control::unset_override();
+            SHOULD_COLORIZE.unset_override();
         }
     }
 

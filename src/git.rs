@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use anyhow::{bail, Context};
 use async_stream::try_stream;
+use colored::control::SHOULD_COLORIZE;
 use futures::{future::Fuse, select, FutureExt, SinkExt as _, StreamExt as _};
 use futures_core::{stream::Stream, FusedFuture};
 use log::{debug, error, info};
@@ -64,7 +65,9 @@ pub trait Worktree: Debug {
         S: AsRef<OsStr>,
     {
         let mut cmd = Command::new("git");
-        cmd.current_dir(self.path()).args(args);
+        cmd.current_dir(self.path());
+        cmd.args(["-c", &format!("color.ui={}", SHOULD_COLORIZE.should_colorize())]);
+        cmd.args(args);
         cmd
     }
 
@@ -125,7 +128,7 @@ pub trait Worktree: Debug {
         let mut format_arg = OsString::from("--format=");
         format_arg.push(format_spec.as_ref());
         let stdout = self
-            .git(["log", "--graph", "--color=always"])
+            .git(["log", "--graph"])
             .args([&format_arg, range_spec.as_ref()])
             .execute()
             .await
@@ -146,7 +149,7 @@ pub trait Worktree: Debug {
         let mut format_arg = OsString::from("--format=");
         format_arg.push(format_spec.as_ref());
         let stdout = self
-            .git(["log", "-n1", "--color=always"])
+            .git(["log", "-n1"])
             .args([&format_arg, rev_spec.as_ref()])
             .execute()
             .await
