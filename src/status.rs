@@ -23,7 +23,7 @@ pub struct Tracker<W: Worktree, O: Write> {
 // This ought to be private to Tracker::reset, rust just doesn't seem to let you do that.
 lazy_static! {
     static ref COMMIT_HASH_REGEX: Regex = Regex::new("[0-9a-z]{40,}").unwrap();
-    static ref GRAPH_COMPONENT_REGEX: Regex = Regex::new(r"[\\/*]").unwrap();
+    static ref GRAPH_COMPONENT_REGEX: Regex = Regex::new(r"[\\/\*]").unwrap();
 }
 
 impl<W: Worktree, O: Write> Tracker<W, O> {
@@ -133,23 +133,24 @@ impl OutputBuffer {
             .into_string()
             .map_err(|_err| anyhow::anyhow!("got non-utf8 output from git log"))?;
 
-        let mut cur_chunk = String::new();
-        let mut chunks = Vec::new();
+        // Each chunk is a Vec of lines.
+        let mut cur_chunk = Vec::<&str>::new();
+        let mut chunks = Vec::<Vec<&str>>::new();
         for line in graph_buf.split('\n') {
             // --graph uses * to represent a node in the DAG.
             if line.contains('*') && !cur_chunk.is_empty() {
                 chunks.push(mem::take(&mut cur_chunk));
             }
-            cur_chunk += line;
+            cur_chunk.push(line);
         }
         chunks.push(cur_chunk);
 
         let mut lines = Vec::new();
         let mut status_commits = HashMap::new();
-        for chunk in chunks {
+        for mut chunk in chunks {
             // The commit hash should be the only alphanumeric sequence in
-            // the chunk.
-            let matches: Vec<_> = COMMIT_HASH_REGEX.find_iter(&chunk).collect();
+            // the chunk and it should be in the first line.
+            let matches: Vec<_> = COMMIT_HASH_REGEX.find_iter(chunk[0]).collect();
             if matches.len() != 1 {
                 bail!(
                     "matched {} commit hashes in graph chunk:\n{:?}",
@@ -172,20 +173,18 @@ impl OutputBuffer {
             // Git printed.
             let log_n1 = log_n1.strip_suffix('\n').unwrap_or(&log_n1);
 
-            let mut graph_lines: Vec<&str> = chunk.split('\n').collect();
-
             // We only want the graph bit, strip out the commit hash which we
             // only put in there as an anchor for this algorithm.
-            graph_lines[0] = &graph_lines[0][..mattch.range().start];
+            chunk[0] = &chunk[0][..mattch.range().start];
 
-            let extension_line;
             let mut info_lines: Vec<&str> = log_n1.split('\n').collect();
 
             // Here's where we'll inject the live status
             status_commits.insert(lines.len() + info_lines.len(), hash);
             info_lines.push("");
 
-            let graph_line_deficit = info_lines.len() as isize - graph_lines.len() as isize;
+            let graph_line_deficit = info_lines.len() as isize - chunk.len() as isize;
+            let extension_line;
             if graph_line_deficit > 0 {
                 // We assume that the first line of the chunk will contain an
                 // asterisk identifying the current commit, and some vertical
@@ -198,18 +197,18 @@ impl OutputBuffer {
                 // kernel history, search back to commit 578cc98b66f5a5 and you
                 // will see it. So we need to replace diagnoals with verticals
                 // too.
-                extension_line = GRAPH_COMPONENT_REGEX.replace_all(graph_lines[0], "|");
+                extension_line = GRAPH_COMPONENT_REGEX.replace_all(chunk[0], "|");
                 for _ in 0..graph_line_deficit {
-                    graph_lines.insert(1, &extension_line);
+                    chunk.insert(1, &extension_line);
                 }
             } else {
                 // Append empty entries to the info lines so that the zip below works nicely.
                 info_lines.append(&mut vec![""; -graph_line_deficit as usize]);
             }
-            assert_eq!(info_lines.len(), graph_lines.len());
+            assert_eq!(info_lines.len(), chunk.len());
 
             lines.append(
-                &mut graph_lines
+                &mut chunk
                     .iter()
                     .zip(info_lines.iter())
                     .map(|(graph, info)| (*graph).to_owned() + *info)
@@ -330,8 +329,8 @@ mod tests {
             str::from_utf8(&buf.into_inner().unwrap()).unwrap(),
             eq("* 08e80af 3\n\
                 | my_test1: Enqueued my_test2: success \n\
-                * b29043f 2\n\
-                | my_test1: oh no my_test2: Started \n"));
+                * b29043f 2\n".to_owned() +
+                "  my_test1: oh no my_test2: Started \n\n"));
     }
 
     #[googletest::test]
@@ -373,11 +372,21 @@ mod tests {
         ob.render(&mut buf, &statuses)
             .expect("OutputBuffer::render failed");
 
+        // Note this is a kinda weird log. We excluded the common ancestor of all the commits.
+        // Also note it's a kinda weird input because we haven't provided any
+        // statuses all of the commits (this does momentarily happen IRL).
         expect_that!(
             str::from_utf8(&buf.into_inner().unwrap()).unwrap(),
-            eq("* 08e80af 3\n\
-                | my_test1: Enqueued my_test2: success \n\
-                * b29043f 2\n\
-                | my_test1: oh no my_test2: Started \n"));
+            eq("*-.   05d10f7 merge commit\n\
+                |\\ \\  \n\
+                | | | \n\
+                | | * eea5ddf 2\n\
+                | |   my_test1: oh no my_test2: Started \n\
+                | * 839dc2e 1\n\
+                | | \n\
+                | * 7de308a join\n\
+                |   \n\
+                * 02ad53b 3\n".to_owned() +
+                "  my_test1: Enqueued my_test2: success \n\n"));
     }
 }
