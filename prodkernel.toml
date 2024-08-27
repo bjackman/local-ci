@@ -1,0 +1,38 @@
+resources = ["kbs"]
+num_worktrees = 8
+
+[[tests]]
+name = "gbuild2-remote-dbg"
+resources = ["kbs"]
+command = ["bash", "-c", "gbuild2 --remote --noneed_local_outputs --commit=$LCI_COMMIT GTESTS=1 CONFIG=dbg"]
+
+[[tests]]
+name = "gbuild2-remote-kdump"
+resources = ["kbs"]
+command = ["bash", "-c", "gbuild2 --remote --noneed_local_outputs --commit=$LCI_COMMIT CONFIG=kdump"]
+
+# [[tests]]
+# name = "build-defconfig"
+# command = ["bash", "-x", "-c", """
+# make defconfig
+# make -j16 CC="ccache gcc" KBUILD_BUILD_TIMESTAMP= vmlinux
+# """]
+
+# [[tests]]
+# name = "build-upstream-asi"
+# command = ["bash", "-x", "-c", """
+# make defconfig
+# scripts/config -d CONFIG_PARAVIRT -e MITIGATION_ADDRESS_SPACE_ISOLATION \
+#     -e CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT -e KVM -e KVM_INTEL -e KVM_AMD
+# make olddefconfig
+# make -j16 CC="ccache gcc" KBUILD_BUILD_TIMESTAMP= vmlinux
+# """]
+
+[[tests]]
+name = "kunit-qemu"
+command = ["bash", "-x", "-c", """
+make -j mrproper
+tools/testing/kunit/kunit.py run --arch=x86_64 --timeout=10 \
+    --jobs=`nproc --all` --kunitconfig=arch/x86/mm/.kunitconfig --qemu_args "-smp 2" \
+    --make_options "LLVM=1" --make_options "CC=ccache clang" --kernel_args asi=on
+"""]
