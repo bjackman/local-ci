@@ -13,6 +13,7 @@ TODOS:
    is a status tracking bug or if the system is stuck somehow.
  - Bug: Test/fix behaviour when range under test is empty.
  - Bug: Status output doesn't seem to get updated when tested range shrinks?
+ - Bug: Test/fix behaviour when range under test is empty.
  - Gather overall status and present it readably somehow to the user.
    - Present status with git DAG view.
  - Store output and artifacts. WIP but:
