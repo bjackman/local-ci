@@ -1,6 +1,7 @@
 use anyhow::Context;
 use clap::Parser as _;
 use futures::StreamExt;
+use log::info;
 use tokio_util::sync::CancellationToken;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -108,7 +109,11 @@ async fn main() -> anyhow::Result<()> {
                 // TODO: What the fucking fuck???? I should have used Perl.
                 println!("{:?}", result);
             },
-            _ =  cancellation_token.cancelled() => break,
+            _ =  cancellation_token.cancelled() => {
+                info!("Got shutdown signal, terminating jobs and waiting");
+                m.set_revisions([])?;
+                break;
+            }
         )
     }
     m.settled().await;

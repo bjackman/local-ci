@@ -4,6 +4,7 @@ use std::{
     fs, iter,
     path::Path,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context as _};
@@ -68,6 +69,16 @@ pub struct Test {
     name: String,
     command: Command,
     resources: Option<Vec<Resource>>,
+    #[serde(default = "default_shutdown_grace_period")]
+    /// When a job is no longer needed it's SIGINTed. If it doesn't respond (by
+    /// dying) after this duration it will then be SIGKILLed. This also affects
+    /// the overall shutdown of local-ci so do not set this to longer than you are
+    /// willing to wait when you terminate this program.
+    shutdown_grace_period_s: u64,
+}
+
+fn default_shutdown_grace_period() -> u64 {
+    10
 }
 
 #[derive(Deserialize, Debug)]
@@ -119,6 +130,7 @@ pub fn manager_builder(
                 program: t.command.program(),
                 args: t.command.args(),
                 needs_resource_idxs,
+                shutdown_grace_period: Duration::from_secs(t.shutdown_grace_period_s),
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;

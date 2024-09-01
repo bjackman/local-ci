@@ -10,18 +10,22 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use futures::future::{self, try_join_all, Either};
 use log::debug;
 use log::error;
 use log::info;
+use log::warn;
 use nix::sys::signal::kill;
 use nix::sys::signal::Signal;
 use nix::unistd::Pid;
 use tokio::process::Command;
+use tokio::select;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::git::TempWorktree;
@@ -55,6 +59,7 @@ pub struct Test {
     // Indexes of pools in the Manager's token_pools from which this test needs
     // a resource-token before it can begin.
     pub needs_resource_idxs: Vec<usize>,
+    pub shutdown_grace_period: Duration,
 }
 
 impl Test {
@@ -395,8 +400,8 @@ impl TestJob {
             // write this block as a single chain of methods? But it seems ridiculous to me.
             {
                 let exit_code = wait_result
-                        .map_err(anyhow::Error::from)?
-                        .code_not_killed()?;
+                    .map_err(anyhow::Error::from)?
+                    .code_not_killed()?;
                 self.output.set_exit_code(exit_code)?;
                 Ok(Some(exit_code))
             }
@@ -406,7 +411,15 @@ impl TestJob {
                 // We don't care about its result but we
                 // need to wait for it to shut down so that we can safely give back the
                 // worktree.
-                let _ = child_fut.await;
+                let timeout = sleep(self.test.shutdown_grace_period);
+                select!(
+                    _ = child_fut => (),
+                    _ = timeout => {
+                        // Canceled. Shut down the process.
+                        warn!("timeout for {:?}, SIGKILLing", self.test.name);
+                        kill(pid, Signal::SIGKILL).context("couldn't interrupt child job")?;
+                    }
+                );
 
                 Ok(None)
             }
@@ -607,6 +620,7 @@ mod tests {
                 program: self.program(),
                 args: self.args(),
                 needs_resource_idxs: vec![],
+                shutdown_grace_period: Duration::from_secs(5),
             }
         }
     }
@@ -905,6 +919,7 @@ mod tests {
             program: script.program(),
             args: script.args(),
             needs_resource_idxs: vec![1],
+            shutdown_grace_period: Duration::from_secs(5),
         }];
         let mut m = Manager::builder(repo.clone(), tests, resource_token_counts)
             .num_worktrees(4)

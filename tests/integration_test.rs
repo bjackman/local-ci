@@ -1,15 +1,12 @@
 use std::{
-    io::Write,
-    ops::{Deref, DerefMut},
-    os::unix::process::ExitStatusExt,
-    process::{Child, Stdio},
-    time::{Duration, Instant},
+    fs, io::Write, ops::{Deref, DerefMut}, os::unix::process::ExitStatusExt, path::Path, process::{Child, Stdio}, str::FromStr, time::{Duration, Instant}
 };
 
 use anyhow::{bail, Context as _, Result};
 use glob::glob;
 use log::error;
 use nix::{
+    libc::pid_t,
     sys::signal::{kill, Signal},
     unistd::Pid,
 };
@@ -160,4 +157,36 @@ fn test_worktree_teardown(test_command: &str) {
         !lci.has_worktrees().unwrap(),
         "worktrees not cleaned up on SIGINT"
     );
+}
+
+fn pid_running(pid: pid_t) -> bool {
+    return Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[test_log::test]
+fn shouldnt_leak_jobs() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // This config has a test that does not respect SIGINT. We should not leak
+    // that job.
+    let mut lci = LocalCiChild::new(format!(
+        r##"
+        num_worktrees = 1
+        [[tests]]
+        name = "my_test"
+        command = "echo $$ > {}/test_pid; while true; do sleep infinity; done"
+        shutdown_grace_period_s = 1
+    "##,
+        temp_dir.path().to_string_lossy()
+    ))
+    .unwrap();
+
+    // Wait for test to start up
+    let test_pid_path = temp_dir.path().join("test_pid");
+    wait_for(|| Ok(test_pid_path.exists()), Duration::from_secs(5))
+        .expect(&format!("worktree not found after 5s"));
+    let pid: pid_t = pid_t::from_str(&fs::read_to_string(test_pid_path).unwrap().trim()).unwrap();
+
+    lci.terminate().unwrap();
+    assert!(!pid_running(pid));
 }
