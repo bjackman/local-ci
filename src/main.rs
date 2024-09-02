@@ -109,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
                 // status tracker reset (does synchronhous work).
                 test_manager.set_revisions(revs.clone())?;
                 status_tracker.set_range(&range_spec).await.context("resetting status tracker")?;
+                status_tracker.repaint().context("error painting status to stdout")?;
             },
             notif = notifs.recv() => {
                 // https://github.com/rust-lang/futures-rs/issues/1857
