@@ -24,6 +24,8 @@ use test_bin::get_test_bin;
 use test_case::test_case;
 use test_log;
 
+use local_ci::test_utils::git::TempRepo;
+
 fn wait_for<F>(mut predicate: F, timeout: Duration) -> anyhow::Result<()>
 where
     F: FnMut() -> anyhow::Result<bool>,

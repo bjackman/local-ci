@@ -495,8 +495,8 @@ mod tests {
     };
 
     use crate::{
+        test_utils::git::{TempRepo, WorktreeExt},
         git::{
-            test_utils::{TempRepo, WorktreeExt},
             CommitHash,
         },
         test_utils::{path_exists, some_time, timeout_5s},

@@ -8,8 +8,6 @@ use std::process::Command as SyncCommand;
 use std::str;
 use std::time::Duration;
 
-#[cfg(test)]
-use anyhow::anyhow;
 use anyhow::{bail, Context};
 use async_stream::try_stream;
 use futures::{future::Fuse, select, FutureExt, SinkExt as _, StreamExt as _};
@@ -25,6 +23,12 @@ use crate::process::{OutputExt, SyncCommandExt};
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct CommitHash(String);
+
+impl CommitHash {
+    pub fn new<S: AsRef<str>>(s: S) -> Self {
+        CommitHash(s.as_ref().to_owned())
+    }
+}
 
 impl AsRef<OsStr> for CommitHash {
     fn as_ref(&self) -> &OsStr {
@@ -68,6 +72,7 @@ pub trait Worktree: Debug {
         cmd
     }
 
+    #[allow(async_fn_in_trait)] // Only used locally within this project.
     async fn git_dir(&self) -> anyhow::Result<PathBuf> {
         let output = self
             .git(["rev-parse", "--git-dir"])
@@ -77,6 +82,7 @@ pub trait Worktree: Debug {
         Ok(OsStr::from_bytes(&output.stderr).into())
     }
 
+    #[allow(async_fn_in_trait)] // Only used locally within this project.
     async fn rev_list<S>(&self, range_spec: S) -> anyhow::Result<Vec<CommitHash>>
     where
         S: AsRef<OsStr>,
@@ -104,6 +110,7 @@ pub trait Worktree: Debug {
         Ok(out_str.lines().map(|l| CommitHash(l.to_owned())).collect())
     }
 
+    #[allow(async_fn_in_trait)] // Only used locally within this project.
     async fn checkout(&self, commit: &CommitHash) -> anyhow::Result<()> {
         self.git(["checkout"])
             .arg(commit)
@@ -248,85 +255,6 @@ impl Drop for TempWorktree {
             });
         debug!("Delorted worktree at {:?}", self.temp_dir.path());
     }
-}
-
-#[cfg(test)]
-pub mod test_utils {
-
-    use chrono::{DateTime, Utc};
-
-    use super::*;
-
-    #[derive(Debug)]
-    pub struct TempRepo {
-        temp_dir: TempDir,
-    }
-
-    // Empty repository in a temporary directory, torn down on drop.
-    impl TempRepo {
-        pub async fn new() -> anyhow::Result<Self> {
-            // https://www.youtube.com/watch?v=_MwboA5NIVA
-            let zelf = Self {
-                temp_dir: TempDir::with_prefix("fixture-").expect("couldn't make tempdir"),
-            };
-            zelf.git(["init"]).execute().await?;
-            Ok(zelf)
-        }
-    }
-
-    impl Worktree for TempRepo {
-        fn path(&self) -> &Path {
-            self.temp_dir.path()
-        }
-    }
-
-    pub trait WorktreeExt: Worktree {
-        // timestamp is used for both committer and author. This ought to make
-        // commit hashes deterministic.
-        async fn commit<S>(&self, message: S, timestamp: DateTime<Utc>) -> anyhow::Result<CommitHash>
-        where
-            S: AsRef<OsStr>,
-        {
-            let ts_is08601 = format!("{}", timestamp.format("%+"));
-            self.git(["commit", "-m"])
-                .arg(message)
-                .arg("--allow-empty")
-                .env("GIT_AUTHOR_DATE", ts_is08601.clone())
-                .env("GIT_COMMITTER_DATE", ts_is08601)
-                .execute()
-                .await
-                .context("'git commit' failed")?;
-            // Doesn't seem like there's a safer way to do this than commit and then retroactively parse
-            // HEAD and hope nobody else is messing with us.
-            self.rev_parse("HEAD")
-                .await?
-                .ok_or(anyhow!("no HEAD after committing"))
-        }
-
-        // None means we successfully looked it up but it didn't exist.
-        async fn rev_parse<S>(&self, rev_spec: S) -> anyhow::Result<Option<CommitHash>>
-        where
-            S: AsRef<OsStr>,
-        {
-            let output = self
-                .git(["rev-parse"])
-                .arg(rev_spec)
-                .execute()
-                .await
-                .context("'git rev-parse' failed")?;
-            // Hack: empirically, rev-parse returns 128 when the range is invalid, it's not documented
-            // but hopefully this is stable behaviour that we're supposed to be able to rely on for
-            // this...?
-            if output.code_not_killed()? == 128 {
-                return Ok(None);
-            }
-            let out_string =
-                String::from_utf8(output.stdout).context("reading git rev-parse output")?;
-            Ok(Some(CommitHash(out_string.trim().to_owned())))
-        }
-    }
-
-    impl<W: Worktree> WorktreeExt for W { }
 }
 
 #[cfg(test)]
