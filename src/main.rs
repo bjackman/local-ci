@@ -15,6 +15,7 @@ use crate::git::Worktree;
 
 mod config;
 mod git;
+mod http;
 mod process;
 mod resource;
 mod result;
@@ -133,6 +134,9 @@ async fn main() -> anyhow::Result<()> {
         signal::ctrl_c().await.expect("error listening for ctrl-C");
         token.cancel()
     });
+
+    info!("serving from {:?}", args.runtime_default.result_db.clone());
+    tokio::spawn(http::serve_dir(args.runtime_default.result_db.clone()));
 
     let repo = git::PersistentWorktree {
         path: args.repo.to_owned().into(),
