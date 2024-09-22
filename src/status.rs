@@ -8,13 +8,13 @@ use regex::Regex;
 
 use crate::{
     git::{CommitHash, Worktree},
-    test::{Notification, TestStatus},
+    test::{Notification, TestCase, TestStatus},
 };
 
 pub struct Tracker<W: Worktree, O: Write> {
     repo: Arc<W>,
     // Inner string key is test name.
-    statuses: HashMap<CommitHash, HashMap<String, TestStatus>>,
+    statuses: HashMap<CommitHash, HashMap<String, (TestCase, TestStatus)>>,
     output_buf: OutputBuffer,
     output: O,
     lines_to_clear: usize,
@@ -51,7 +51,10 @@ impl<W: Worktree, O: Write> Tracker<W, O> {
             .statuses
             .entry(notif.test_case.commit_hash.clone())
             .or_default();
-        commit_statuses.insert(notif.test_case.test.name.clone(), notif.status.clone());
+        commit_statuses.insert(
+            notif.test_case.test.name.clone(),
+            (notif.test_case.clone(), notif.status.clone()),
+        );
     }
 
     pub fn repaint(&mut self) -> anyhow::Result<()> {
@@ -232,7 +235,7 @@ impl OutputBuffer {
     fn render(
         &self,
         output: &mut impl Write,
-        statuses: &HashMap<CommitHash, HashMap<String, TestStatus>>,
+        statuses: &HashMap<CommitHash, HashMap<String, (TestCase, TestStatus)>>,
     ) -> anyhow::Result<usize> {
         if self.lines.is_empty() {
             output.write_all(b"[range empty]\n")?;
@@ -242,15 +245,21 @@ impl OutputBuffer {
             output.write_all(line.as_bytes())?;
             if let Some(hash) = self.status_commits.get(&i) {
                 if let Some(statuses) = statuses.get(hash) {
-                    let mut statuses: Vec<(&String, &TestStatus)> = statuses.iter().collect();
+                    let mut statuses: Vec<(&String, &(TestCase, TestStatus))> =
+                        statuses.iter().collect();
                     // Sort by test case name. Would like sort_by_key here but
                     // there's lifetime pain.
                     statuses.sort_by(|(name1, _), (name2, _)| name1.cmp(name2));
-                    for (name, status) in statuses {
+                    for (name, (test_case, status)) in statuses {
+                        let stdout_url = format!(
+                            "http://localhost:3000/{}/{}/stdout.txt",
+                            test_case.storage_hash(), name
+                        );
                         output.write_all(
                             format!(
-                                "{}: {} ",
+                                "{}: \x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\ ",
                                 name.bold(),
+                                stdout_url,
                                 match status {
                                     TestStatus::Error(msg) => msg.on_bright_red(),
                                     TestStatus::Completed(result) =>
