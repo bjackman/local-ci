@@ -85,7 +85,7 @@ async fn handle_req(
 async fn do_serve_dir(root_dir: PathBuf) -> anyhow::Result<()> {
     let root_dir = Arc::new(root_dir);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
 
     let listener = TcpListener::bind(addr).await?;
 

@@ -4,6 +4,7 @@ use ansi_control_codes::control_sequences::{CPL, ED};
 use anyhow::{self, bail, Context as _};
 use colored::Colorize;
 use lazy_static::lazy_static;
+use nix::sys::utsname::uname;
 use regex::Regex;
 
 use crate::{
@@ -252,8 +253,10 @@ impl OutputBuffer {
                     statuses.sort_by(|(name1, _), (name2, _)| name1.cmp(name2));
                     for (name, (test_case, status)) in statuses {
                         let stdout_url = format!(
-                            "http://localhost:3000/{}/{}/stdout.txt",
-                            test_case.storage_hash(), name
+                            "http://{}:3000/{}/{}/stdout.txt",
+                            uname().context("uname error")?.nodename().to_string_lossy(),
+                            test_case.storage_hash(),
+                            name
                         );
                         output.write_all(
                             format!(
