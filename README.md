@@ -10,19 +10,11 @@ set `nice 10` for the current shell.
 
 Bugs (high to low priority):
 
- - Cancelled jobs still get cached if they shut down via `exit` instead of being
-   directly terminated by `SIGINT`. This only happens in a full real-world run, I think 
-   it's specifically caused by the `SIGINT` being inherited by the child
-   processes, the logic in `test.rs` is correct in the world where jobs only
-   ever get canceled by signals we send them ourselves.
  - Linked output data gets interpreted as HTML instead of plaintext.
  - Sometimes the system gets gummed up, I'm not sure if this is just a
    status reporting issue or if the system stops making progress at at all.
    Probably should fix all the simpler bugs first then look into this some more.
    I don't see this when running against this repo, only when running on my big fat kernel tree.
- - Shutdown still does not happen cleanly on my kernel repo. At least one reason
-   for this seems to be that child processes inherit the SIGINT. Another is that
-   Ctrl-C just doesn't always kill the service.
  - Status output doesn't seem to get updated when tested range shrinks?
  - No tests for checking config cache...
  - No tests for actual contents of config cache. (E.g: Nothing to catch bug
@@ -32,7 +24,8 @@ Bugs (high to low priority):
 
 Needed features (high to low priority):
 
- - Support re-using worktrees.
+ - Need a way to delete stored results
+ - Need a way for test command to report "error" as distinguished from failure.
  - Support running tests that don't need worktrees.
  - Store output and artifacts. WIP but:
    - Provide a way to limit the size of the result cache.
@@ -48,6 +41,7 @@ Needed features (high to low priority):
  - Support bailing out more quickly if the worktree teardown is too slow.
  - Support configuring a shell, with the default based on the user's
    system-level configuration (`getent`).
+ - Support re-using worktrees.
  - Provide a
    [jobserver](https://www.gnu.org/software/make/manual/html_node/Job-Slots.html).
    Issue with this will be when test commands crash and leak job slots. I think
