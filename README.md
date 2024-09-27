@@ -10,6 +10,15 @@ set `nice 10` for the current shell.
 
 Bugs (high to low priority):
 
+ - ```rust
+   impl PartialEq for Test {
+       fn eq(&self, other: &Self) -> bool {
+           self.config_hash == other.config_hash
+       }
+   }
+   ```
+   my beloved brother and co-beneficiary of christ's loving embrace, that is not
+   how hashing works.
  - Linked output data gets interpreted as HTML instead of plaintext.
  - Sometimes the system gets gummed up, I'm not sure if this is just a
    status reporting issue or if the system stops making progress at at all.
