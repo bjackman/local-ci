@@ -149,6 +149,11 @@ impl<W> ManagerBuilder<W> {
         self
     }
 
+    pub fn config_dir<P: Into<String>>(mut self, dir: P) -> Self {
+        self.job_env.push(("LCI_CONFIG_DIR".into(), dir.into()));
+        self
+    }
+
     // Starts the workers. You must call close() before dropping it.
     //
     // TODO: This doesn't work if there are no commits in the repository. Not sure I care about

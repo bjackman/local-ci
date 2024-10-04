@@ -199,5 +199,6 @@ pub fn manager_builder(
         tests,
         resource_tokens,
     )
-    .num_worktrees(config.num_worktrees))
+    .num_worktrees(config.num_worktrees)
+    .config_dir(config_path.parent().unwrap().to_string_lossy().into_owned()))
 }
