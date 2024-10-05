@@ -349,6 +349,7 @@ mod tests {
             args: vec![],
             needs_resources: [].into(),
             shutdown_grace_period: Duration::from_secs(1),
+            depends_on: vec![],
         })
     }
 

@@ -2,6 +2,7 @@ use core::fmt;
 use core::fmt::Display;
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -14,7 +15,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::bail;
 use anyhow::{anyhow, Context};
+use futures::future::select_all;
+use futures::future::FutureExt;
 use futures::future::{self, try_join_all, Either};
 use itertools::Itertools;
 use log::debug;
@@ -92,6 +96,8 @@ impl Display for TestName {
 }
 
 // A test task that will need to be repeated for each commit.
+// TODO: this struct is too complex for the plain-old-data (pub fields)
+// approach, it should be constructed with a builder.
 #[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct Test {
     pub name: TestName,
@@ -104,6 +110,10 @@ pub struct Test {
     pub needs_resources: HashMap<ResourceKey, usize>,
     pub shutdown_grace_period: Duration,
     pub cache_policy: CachePolicy,
+    // This tests shoudln't start until these other tests have finished.
+    // Manager setup will fail if there are cycles in this graph or named tests
+    // do not exist.
+    pub depends_on: Vec<TestName>,
 }
 
 impl Test {
@@ -170,6 +180,44 @@ impl<W> ManagerBuilder<W> {
         self
     }
 
+    fn check_no_cycles(tests: &Vec<Test>) -> anyhow::Result<()> {
+        let name_to_idx: HashMap<TestName, usize> = tests
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.name.clone(), i))
+            .collect();
+        // We'll assume the graph is pretty small and not try to do anything
+        // clever here. Just do a DFS from each starting point and maintain a
+        // set of observed nodes, using the simplest possible code even if it
+        // means pointless copies.
+        // let check = |start_idx: usize, seen: HashSet<String>| -> anyhow::Result<()> {
+        //
+        // This is a bit annoying in Rust because you cannot capture
+        // environments into a named function but you cannot recurse into a
+        // closure, so we just have to pass everything though args explicitly.
+        fn check(
+            tests: &Vec<Test>,
+            start_idx: usize,
+            seen: &HashSet<TestName>,
+            name_to_idx: &HashMap<TestName, usize>,
+        ) -> anyhow::Result<()> {
+            let start_test = &tests[start_idx];
+            if seen.contains(&start_test.name) {
+                bail!("Cycle in test dependency graph");
+            }
+            let mut seen = seen.clone();
+            seen.insert(start_test.name.clone());
+            for dep_name in start_test.depends_on.iter() {
+                check(tests, name_to_idx[dep_name], &seen, name_to_idx)?;
+            }
+            Ok(())
+        }
+        for i in 0..tests.len() {
+            check(tests, i, &HashSet::new(), &name_to_idx)?;
+        }
+        Ok(())
+    }
+
     // Starts the workers. You must call close() before dropping it.
     //
     // TODO: This doesn't work if there are no commits in the repository. Not sure I care about
@@ -185,6 +233,7 @@ impl<W> ManagerBuilder<W> {
         // trait bounds as subtraits of Workrtree. But I dunno, that feels Wrong.
         W: Worktree + Sync + Send + 'static,
     {
+        Self::check_no_cycles(&self.tests)?;
         info!(
             "Setting up {} worktrees in {:?}...",
             self.num_worktrees, self.worktree_dir
@@ -322,6 +371,25 @@ impl<W: Worktree + Sync + Send + 'static> Manager<W> {
         let pools = self.resource_pools.clone();
         let origin_worktree = self.repo.clone();
         tokio::spawn(async move {
+            // Wait for dependencies do be done, bail early if they do anything
+            // but terminate successfully.
+            if let Err(failed_test_name) = job.await_dep_success().await {
+                info!(
+                    "{:?} canceled due to unsuccess of dependency {failed_test_name:?}",
+                    job.test_case
+                );
+                // TODO: avoid all this duplicative notifying
+                let status =
+                    TestStatus::Error(format!("Dependency {failed_test_name:?} unsuccessful"));
+                tx.send(Arc::new(Notification {
+                    test_case: job.test_case.clone(),
+                    status: status.clone(),
+                }))
+                .or_log_error("Dropping a notification");
+                job.notifier.send(status);
+                return;
+            }
+
             // This "biased" is here because otherwise when we cancel a bunch of jobs all at once,
             // and some of those jobs are blocking on resources held by others,
             // we want the former jobs to observe their own cancellation before
@@ -386,49 +454,84 @@ impl<W: Worktree + Sync + Send + 'static> Manager<W> {
         let test_cases: HashMap<TestCaseId, TestCase> =
             test_cases.into_iter().map(|tc| (tc.id(), tc)).collect();
 
-        // For the ones already running, figure out which we wanna keep (and
-        // therefore we don't need to start) and which should be cancelled to
-        // free up resources.
-        let to_cancel: Vec<TestCaseId> = self
+        // Cancel jobs for test cases that we don't care about any more.
+        // https://github.com/rust-lang/rust/issues/59618 would make this more convenient.
+        self.job_cts = self
             .job_cts
-            .keys()
-            .filter(|id| !test_cases.contains_key(*id))
-            .cloned()
+            .drain()
+            .filter(|(id, cancellation_token)| {
+                if !test_cases.contains_key(id) {
+                    cancellation_token.cancel();
+                    return false;
+                }
+                true
+            })
             .collect();
-        let to_start: HashMap<TestCaseId, TestCase> = test_cases
+
+        // Now start the new jobs.
+        let mut jobs = test_cases
             .into_iter()
-            .filter(|(id, _tc)| !self.job_cts.contains_key(id))
+            // Don't start new jobs for test cases that are already running
+            .filter(|(tc_id, _)| !self.job_cts.contains_key(tc_id))
+            .map(
+                |(tc_id, test_case)| -> anyhow::Result<(TestCaseId, TestJob)> {
+                    Ok((
+                        tc_id,
+                        TestJob {
+                            ct: CancellationToken::new(),
+                            _token: self.job_counter.get(),
+                            output: self.result_db.create_output(&test_case)?,
+                            test_case,
+                            env: self.job_env.clone(),
+                            // We don't have anything to subscribe to yet, leave
+                            // this empty at first and populate later.
+                            wait_for: Vec::new(),
+                            notifier: JobDepNotifier::new(),
+                        },
+                    ))
+                },
+            )
+            .collect::<anyhow::Result<HashMap<TestCaseId, TestJob>>>()?;
+
+        // Now we set up subscriptions to notify inter-job dependency
+        // completion. Rust really hates to mutate one map value based on
+        // another value in the same map, so we do this via an intermediate map
+        // :(
+        let mut wait_subs: HashMap<TestCaseId, Vec<(TestName, watch::Receiver<TestStatus>)>> = jobs
+            .iter()
+            .map(|(id, job)| {
+                (
+                    id.clone(),
+                    job.test_case
+                        .test
+                        .depends_on
+                        .iter()
+                        .map(|dep_name| {
+                            (
+                                dep_name.clone(),
+                                jobs[&TestCaseId::new(&job.test_case.commit_hash, dep_name)]
+                                    .notifier
+                                    .subscribe(),
+                            )
+                        })
+                        .collect(),
+                )
+            })
             .collect();
-        info!(
-            "Enqueueing {:?}, cancelling {:?} jobs",
-            to_start.values().collect::<Vec<_>>(),
-            to_cancel.len()
-        );
-        for id in to_cancel {
-            self.job_cts[&id].cancel();
-            self.job_cts.remove(&id);
+        for (id, job) in jobs.iter_mut() {
+            job.wait_for = wait_subs.remove(id).unwrap();
         }
 
-        for (id, test_case) in to_start.into_iter() {
-            if let Some(test_result) = self.cache_lookup(&test_case).await {
-                self.notify(test_case, TestStatus::Completed(test_result));
+        for (tc_id, job) in jobs.into_iter() {
+            if let Some(test_result) = self.cache_lookup(&job.test_case).await {
+                let result = TestStatus::Completed(test_result);
+                job.notifier.send(result.clone());
+                self.notify(job.test_case, result);
                 continue;
             }
 
-            let ct = CancellationToken::new();
-            let output = self.result_db.create_output(
-                test_case.storage_hash(),
-                &test_case.test.name,
-                test_case.test.config_hash,
-            )?;
-            self.job_cts.insert(id, ct.clone());
-            self.spawn_job(TestJob {
-                ct,
-                _token: self.job_counter.get(),
-                output,
-                test_case,
-                env: self.job_env.clone(),
-            });
+            self.job_cts.insert(tc_id.clone(), job.ct.clone());
+            self.spawn_job(job);
         }
         Ok(())
     }
@@ -444,6 +547,41 @@ impl<W: Worktree + Sync + Send + 'static> Manager<W> {
     // Completes once there are no pending jobs or results.
     pub async fn settled(&self) {
         self.job_counter.zero().await;
+    }
+}
+
+struct JobDepNotifier {
+    tx: watch::Sender<TestStatus>,
+}
+
+impl JobDepNotifier {
+    fn new() -> Self {
+        // This watch API is a bit weird; it's designed on the assumption that
+        // there is some shared value and you want to be notified when that
+        // value is changed. So when you construct a channel you pass in the
+        // initial value, and the rx will immediately "receive" that value.
+        // That isn't what we're using this for - we just wanna send a single
+        // message, so we pass a random dummy as the "initial" value and drop
+        // the rx. Then to create the actual receivers we call subscribe, since
+        // that doesn't lead to the same weird "channel starts out full"
+        // semantics.
+        let (tx, _rx) = watch::channel(TestStatus::Started);
+        Self { tx }
+    }
+
+    fn subscribe(&self) -> watch::Receiver<TestStatus> {
+        self.tx.subscribe()
+    }
+
+    // Report the status of a test. Will be observed by anyone who has already
+    // subscribed. The nature of the channel we're using here means that we can
+    // only ever reliably send one message. If we got that wrong the results
+    // would be confusing to debug, so that's why sending the message consumes
+    // the tx side of the channel.  Returns an error if there is nobody
+    // listening on the inner channel.
+    fn send(self, status: TestStatus) {
+        // Inner failure means nobody is listening. This is fine and normal.
+        let _ = self.tx.send(status);
     }
 }
 
@@ -515,9 +653,58 @@ struct TestJob {
     _token: JobToken,
     output: TestCaseOutput,
     env: Arc<Vec<(String, String)>>,
+    // Job shouldn't start until all of these channels produce a result. If any
+    // is unsuccessful it should abort.
+    wait_for: Vec<(TestName, watch::Receiver<TestStatus>)>,
+    // To avoid waking up every job task unnecessarily via the main notification
+    // channel, we use a separate, internal, notifier mechanism for this
+    // specific purpose.
+    notifier: JobDepNotifier,
 }
 
 impl<'a> TestJob {
+    // Blocks until all dependency jobs have succeeded, or returns an error
+    // reporting the name of the job that terminated without success.
+    async fn await_dep_success(&mut self) -> Result<(), TestName> {
+        // TODO: this is a bit crazyeyyy, we're turning the map of
+        // name->receiver into a vec of futures that return the name and the
+        // eventual status.
+        // This is another thing where the tokio::sync::watch API is a bit
+        // weird, there's no way to wait for a message without passing a
+        // predicate, so we have to pass a dummy one.
+        let mut wait_for = std::mem::take(&mut self.wait_for);
+        info!(
+            "{:?}: Awaiting {} dependency jobs",
+            self.test_case.test.name,
+            wait_for.len()
+        );
+        let wait_for: Vec<_> = wait_for
+            .iter_mut()
+            .map(|(name, rx)| rx.wait_for(|_| true).map(|status| (name.clone(), status)))
+            .collect();
+        let mut wait_for: Vec<_> = wait_for.into_iter().map(Box::pin).collect();
+        while !wait_for.is_empty() {
+            let ((test_name, test_status), _idx, remaining) = select_all(wait_for).await;
+            wait_for = remaining;
+            // We are squashing lots of different types of failures and aborts
+            // (including the "impossible" case that the sender has been dropped
+            // and the rx.wait_for call failed) here, we trust that the other
+            // side of the notifier has reported any issues appropriately.
+            if let TestStatus::Completed(result) = &*test_status.map_err(|_| test_name.clone())? {
+                if result.exit_code == 0 {
+                    info!(
+                        "{:?}: Dependency {:?} succeeded",
+                        self.test_case.test.name, test_name
+                    );
+                    continue;
+                }
+            }
+            return Err(test_name);
+        }
+        info!("{:?}: Dependencies succeeded", self.test_case);
+        Ok(())
+    }
+
     // Returns Ok(None) when canceled.
     async fn checkout_and_run<W>(
         &mut self,
@@ -537,10 +724,7 @@ impl<'a> TestJob {
         current_dir: &Path,
         resources: &Resources<'a>,
     ) -> anyhow::Result<Option<ExitCode>> {
-        info!(
-            "Starting {} for rev {}...",
-            self.test_case.test.name, self.test_case.commit_hash
-        );
+        info!("Starting {:?}", self.test_case);
 
         let mut cmd = self.test_case.test.command();
         let mut cmd = cmd
@@ -729,6 +913,7 @@ pub struct Notification {
 #[cfg(test)]
 mod tests {
     use std::{
+        cmp::max,
         collections::VecDeque,
         fs::{self, remove_file, File},
         io::{self, BufRead as _},
@@ -908,7 +1093,12 @@ mod tests {
                 .count()
         }
 
-        pub fn as_test(&self, cache_policy: CachePolicy, needs_worktree: bool) -> Test {
+        pub fn as_test(
+            &self,
+            cache_policy: CachePolicy,
+            needs_worktree: bool,
+            depends_on: impl IntoIterator<Item = TestName>,
+        ) -> Test {
             Test {
                 name: self.test_name.clone(),
                 program: self.program(),
@@ -921,6 +1111,7 @@ mod tests {
                 shutdown_grace_period: Duration::from_secs(5),
                 cache_policy,
                 config_hash: 0,
+                depends_on: depends_on.into_iter().collect(),
             }
         }
     }
@@ -1059,6 +1250,7 @@ mod tests {
         // via config::Test::parse.
         cache_policies: Vec<CachePolicy>,
         needs_worktree: Vec<bool>,
+        dependencies: Vec<(usize, usize)>,
     }
 
     impl TestScriptFixtureBuilder {
@@ -1067,16 +1259,21 @@ mod tests {
             self
         }
 
-        // Tests per commit.
-        pub fn num_tests(mut self, n: usize) -> Self {
-            self.num_tests = n;
-            while self.cache_policies.len() < self.num_tests {
+        // Ensure we are prepared to set up at least n tests.
+        fn extend(mut self, n: usize) -> Self {
+            while self.cache_policies.len() < n {
                 self.cache_policies.push(CachePolicy::ByCommit);
             }
-            while self.needs_worktree.len() < self.num_tests {
+            while self.needs_worktree.len() < n {
                 self.needs_worktree.push(true);
             }
             self
+        }
+
+        // Tests per commit.
+        pub fn num_tests(mut self, n: usize) -> Self {
+            self.num_tests = n;
+            self.extend(n)
         }
 
         // cache_policies[i] will be the cache policy for the ith test.
@@ -1092,16 +1289,33 @@ mod tests {
             let len = self.needs_worktree.len();
             self.num_tests(len)
         }
+
+        // Declare pairs of text indexes where the first depends on the second.
+        pub fn dependencies(mut self, deps: impl IntoIterator<Item = (usize, usize)>) -> Self {
+            self.dependencies = deps.into_iter().collect();
+            let max_idx = self
+                .dependencies
+                .iter()
+                .map(|&(x, y)| max(x, y))
+                .max()
+                .unwrap_or(0);
+            self.extend(max_idx + 1)
+        }
+    }
+
+    async fn nonempty_temp_repo() -> Arc<TempRepo> {
+        let repo = Arc::new(TempRepo::new().await.unwrap());
+        // TODO: We need to have a commit in the repo otherwise manager
+        // setup will fail. This is a bug.
+        repo.commit("hello,", some_time())
+            .await
+            .expect("couldn't create base commit");
+        repo
     }
 
     impl TestScriptFixtureBuilder {
         pub async fn build(&self) -> TestScriptFixture {
-            let repo = Arc::new(TempRepo::new().await.unwrap());
-            // TODO: We need to have a commit in the repo otherwise manager
-            // setup will fail. This is a bug.
-            repo.commit("hello,", some_time())
-                .await
-                .expect("couldn't create base commit");
+            let repo = nonempty_temp_repo().await;
             let scripts: Vec<TestScript> = (0..self.num_tests)
                 // Here we pass needs_worktree[i] to configure whether the script should
                 // try to detect sharing a worktree with another test run. If it
@@ -1112,11 +1326,24 @@ mod tests {
                 })
                 .collect();
             let db_dir = TempDir::new().expect("couldn't make temp dir for result DB");
+            let tests = izip!(
+                0..self.num_tests,
+                &scripts,
+                &self.cache_policies,
+                &self.needs_worktree
+            )
+            .map(|(i, script, &cache_policy, &needs_worktree)| {
+                let dep_names = self
+                    .dependencies
+                    .iter()
+                    .filter(|(from_idx, _)| *from_idx == i)
+                    .map(|(_, to_idx)| TestName::new(format!("test_{to_idx}")));
+                script.as_test(cache_policy, needs_worktree, dep_names)
+            });
             let manager = Manager::builder(
                 repo.clone(),
                 Database::create_or_open(db_dir.path()).expect("couldn't setup result DB"),
-                izip!(&scripts, &self.cache_policies, &self.needs_worktree)
-                    .map(|(s, &c, &w)| s.as_test(c, w)),
+                tests,
                 [],
             )
             .num_worktrees(self.num_worktrees)
@@ -1139,6 +1366,7 @@ mod tests {
                 num_tests: 2,
                 cache_policies: vec![CachePolicy::ByCommit; 2],
                 needs_worktree: vec![true; 2],
+                dependencies: vec![],
             }
         }
 
@@ -1421,6 +1649,7 @@ mod tests {
             shutdown_grace_period: Duration::from_secs(5),
             cache_policy: CachePolicy::ByCommit,
             config_hash: 0,
+            depends_on: vec![],
         }];
         let db_dir = TempDir::new().expect("couldn't make temp dir for result DB");
         let mut m = Manager::builder(
@@ -1477,6 +1706,7 @@ mod tests {
                 shutdown_grace_period: Duration::from_secs(5),
                 cache_policy: CachePolicy::ByCommit,
                 config_hash: 0,
+                depends_on: vec![],
             }],
             [
                 (
@@ -1755,6 +1985,86 @@ mod tests {
         // We were testing test_hash but we shouldn't have checked it out, since
         // we don't "own" the worktree.
         assert_eq!(f.repo.rev_parse("HEAD").await.unwrap(), Some(head_hash));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn should_detect_dependency_loops() {
+        // Ummmmmmmmmmmmmmm I can't be bothered to write more test cases lmao
+        // algorithms are boring.
+        let tests = [
+            Test {
+                name: TestName::new("my_test"),
+                program: "foo".into(),
+                args: vec!["bar".into()],
+                needs_resources: HashMap::new(),
+                shutdown_grace_period: Duration::from_secs(5),
+                cache_policy: CachePolicy::ByCommit,
+                config_hash: 0,
+                depends_on: vec![TestName::new("my_other_test")],
+            },
+            Test {
+                name: TestName::new("my_other_test"),
+                program: "foo".into(),
+                args: vec!["bar".into()],
+                needs_resources: HashMap::new(),
+                shutdown_grace_period: Duration::from_secs(5),
+                cache_policy: CachePolicy::ByCommit,
+                config_hash: 0,
+                depends_on: vec![TestName::new("my_test")],
+            },
+        ];
+        let repo = nonempty_temp_repo().await;
+        let db_dir = TempDir::new().expect("couldn't make temp dir for result DB");
+        let result = Manager::builder(
+            repo.clone(),
+            Database::create_or_open(db_dir.path()).expect("couldn't setup result DB"),
+            tests,
+            [],
+        )
+        .build()
+        .await;
+        match result {
+            Ok(_) => panic!("Successfully created Manager with test dep cycles, should fail"),
+            // Hacky lazy attempt to detect if this test got broken and we are
+            // failing for the wrong reason.
+            Err(err) => {
+                if !err.to_string().to_lowercase().contains("cycle") {
+                    panic!("Didn't see the word 'cycle' in error message, is this test working? error: {:?}", err);
+                }
+            }
+        }
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn should_wait_for_dependencies() {
+        let mut f = TestScriptFixture::builder()
+            .dependencies([(1, 0)])
+            .num_worktrees(2)
+            .build()
+            .await;
+        let hash = f
+            .repo
+            .commit(TestScript::BLOCK_COMMIT_MSG_TAG, some_time())
+            .await
+            .unwrap();
+        f.manager.set_revisions(vec![hash.clone()]).await.unwrap();
+        timeout_5s(f.scripts[0].started(&hash))
+            .await
+            .expect("Initial test did not start");
+
+        // Annoying: now we need to check that the second test doesn't get
+        // started. But how long do we wait...? Just, some arbitrary time. So
+        // sometimes this test can pass even if there's a bug :(
+        sleep(Duration::from_secs(1)).await;
+
+        assert!(
+            !f.scripts[1].was_started(&hash),
+            "Test with dependency started when dep not finished"
+        );
+
+        // TODO: Test when dependency fails.
+        // TODO: Test that changes to dependency config hashes invalidates
+        // result cache.
     }
 
     // TODO: if the tests fail, the TempWorktree cleanup goes haywire, something

@@ -82,6 +82,12 @@ pub struct Test {
     shutdown_grace_period_s: u64,
     #[serde(default = "default_cache_policy")]
     cache: CachePolicy,
+    #[serde(default = "default_depends_on")]
+    depends_on: Vec<String>,
+}
+
+fn default_depends_on() -> Vec<String> {
+    vec![]
 }
 
 fn default_requires_worktree() -> bool {
@@ -121,6 +127,7 @@ impl Test {
                 self.hash(&mut h);
                 h.finish()
             },
+            depends_on: self.depends_on.iter().map(TestName::new).collect(),
         })
     }
 }

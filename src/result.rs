@@ -68,14 +68,11 @@ impl Database {
 
     // Prepare to create the output directory for a job output, but don't actually create it yet.
     // It's created once you use one of the methods of CommitOutput for writing data.
-    pub fn create_output(
-        &self,
-        hash: &Hash,
-        test_name: &TestName,
-        // Hash of the config that created the test.
-        config_hash: ConfigHash,
-    ) -> anyhow::Result<TestCaseOutput> {
-        TestCaseOutput::new(self.result_path(hash, test_name), config_hash)
+    pub fn create_output(&self, test_case: &TestCase) -> anyhow::Result<TestCaseOutput> {
+        TestCaseOutput::new(
+            self.result_path(test_case.storage_hash(), &test_case.test.name),
+            test_case.test.config_hash,
+        )
     }
 }
 
