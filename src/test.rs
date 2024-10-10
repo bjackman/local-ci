@@ -364,7 +364,14 @@ impl<W: Worktree + Sync + Send + 'static> Manager<W> {
             .or_log_error("Dropping a notification. Probably nothing was listening");
     }
 
-    fn spawn_job(&self, mut job: TestJob) {
+    async fn spawn_job(&self, mut job: TestJob) {
+        if let Some(test_result) = self.cache_lookup(&job.test_case).await {
+            let result = TestStatus::Completed(test_result);
+            job.notifier.send(result.clone());
+            self.notify(job.test_case, result);
+            return;
+        }
+
         self.notify(job.test_case.clone(), TestStatus::Enqueued);
 
         let tx = self.result_tx.clone();
@@ -523,15 +530,8 @@ impl<W: Worktree + Sync + Send + 'static> Manager<W> {
         }
 
         for (tc_id, job) in jobs.into_iter() {
-            if let Some(test_result) = self.cache_lookup(&job.test_case).await {
-                let result = TestStatus::Completed(test_result);
-                job.notifier.send(result.clone());
-                self.notify(job.test_case, result);
-                continue;
-            }
-
             self.job_cts.insert(tc_id.clone(), job.ct.clone());
-            self.spawn_job(job);
+            self.spawn_job(job).await;
         }
         Ok(())
     }
