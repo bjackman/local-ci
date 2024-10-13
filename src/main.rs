@@ -62,11 +62,18 @@ struct WatchArgs {
     base: String,
 }
 
+#[derive(clap::Args)]
+struct TestArgs {
+    test: String,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// The main command. Watch a repository and run tests whenever the revision
     /// ranges changes.
     Watch(WatchArgs),
+    /// Run a one-shot test in the specified repo. Do not cache the results.
+    Test(TestArgs),
 }
 
 // Clap's derive API doesn't support argument defaults that depend on runtime
@@ -214,6 +221,14 @@ async fn watch(
     Ok(())
 }
 
+async fn test(
+    cancellation_token: CancellationToken,
+    args: &Args,
+    test_args: &TestArgs,
+) -> anyhow::Result<()> {
+Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -240,5 +255,6 @@ async fn main() -> anyhow::Result<()> {
 
     match args.command {
         Command::Watch(ref watch_args) => watch(cancellation_token, &args, watch_args).await,
+        Command::Test(ref test_args) => test(cancellation_token, &args, test_args).await,
     }
 }
