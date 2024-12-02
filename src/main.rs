@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context};
 use clap::{arg, Parser as _, Subcommand, ValueEnum};
 use config::{Config, ParsedConfig};
 use dag::{Dag, GraphNode as _};
-use database::{Database, DatabaseOutput};
+use database::{Database, DatabaseEntry, DatabaseOutput};
 use futures::future::join_all;
 use futures::StreamExt;
 use git::{Commit, PersistentWorktree, TempWorktree};
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::{stdout, Stdout};
-use std::path::{absolute, PathBuf};
+use std::path::{absolute, Path, PathBuf};
 use std::pin::pin;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -154,6 +154,7 @@ struct GetArgs {
 enum GetOutput {
     Stdout,
     Stderr,
+    Artifacts,
 }
 
 impl Display for GetOutput {
@@ -164,6 +165,7 @@ impl Display for GetOutput {
             match self {
                 Self::Stdout => "stdout",
                 Self::Stderr => "stderr",
+                Self::Artifacts => "artifacts",
             }
         )
     }
@@ -363,7 +365,9 @@ async fn ensure_job_success(
         .into()
 }
 
-struct OneshotOutput {}
+struct OneshotOutput {
+    artifacts_dir: PathBuf,
+}
 
 impl TestJobOutput for OneshotOutput {
     fn stdout(&mut self) -> anyhow::Result<Stdio> {
@@ -375,6 +379,9 @@ impl TestJobOutput for OneshotOutput {
     fn set_result(&mut self, result: &TestResult) -> anyhow::Result<()> {
         eprintln!("Job result: {result:?}");
         Ok(())
+    }
+    fn artifacts_dir(&mut self) -> anyhow::Result<&Path> {
+        Ok(&self.artifacts_dir)
     }
 }
 
@@ -506,13 +513,17 @@ async fn test(
         eprintln!("Dependency jobs complete.");
     }
 
+    let artifacts_dir = TempDir::with_prefix("limmat-artifacts-")?.into_path();
+    eprintln!("Setting $LIMMAT_ARTIFACTS to {}", artifacts_dir.display());
+
     let test = env.config.tests.node(&test_name).unwrap();
     let test_case = TestCase::new(head.clone(), test.clone());
     let mut needs_resources = test_case.test.needs_resources.clone();
+
     let job = TestJobBuilder::new(
         cancellation_token.clone(),
         test_case,
-        OneshotOutput {},
+        OneshotOutput { artifacts_dir },
         Arc::new(base_job_env(env.repo.path())),
         Vec::new(), // wait_for
     )
@@ -525,18 +536,25 @@ async fn test(
     status.into()
 }
 
-async fn get(
+// Run a single test at the revision specified in the args.
+async fn get_common(
     env: Env,
     cancellation_token: CancellationToken,
-    get_args: GetArgs,
-) -> anyhow::Result<()> {
+    get_args: &GetArgs,
+) -> anyhow::Result<DatabaseEntry> {
     let test_name = TestName::new(get_args.test.clone());
     let rev = env
         .repo
         .rev_parse(&get_args.rev)
         .await
         .context("error looking up commit")?
-        .ok_or_else(|| anyhow!("revision {:?} not found", get_args.test))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "revision {:?} not found in {}",
+                get_args.test,
+                env.repo.path().display()
+            )
+        })?;
 
     if get_args.run {
         let tests: Vec<&Arc<Test>> = env
@@ -557,8 +575,7 @@ async fn get(
         .tests
         .node(&test_name)
         .ok_or(anyhow!("no such test {:?}", test_name.to_string()))?;
-    let db_entry = env
-        .database
+    env.database
         .lookup_result(&TestCase::new(rev.clone(), test.clone()))
         .context("looking up result in database")?
         .ok_or_else(|| {
@@ -568,10 +585,19 @@ async fn get(
                 get_args.rev,
                 rev.hash
             )
-        })?;
+        })
+}
+
+async fn get(
+    env: Env,
+    cancellation_token: CancellationToken,
+    get_args: GetArgs,
+) -> anyhow::Result<()> {
+    let db_entry = get_common(env, cancellation_token, &get_args).await?;
     match get_args.output {
         GetOutput::Stdout => println!("{}", db_entry.stdout_path().display()),
         GetOutput::Stderr => println!("{}", db_entry.stderr_path().display()),
+        GetOutput::Artifacts => println!("{}", db_entry.artifacts_dir().display()),
     }
     Ok(())
 }

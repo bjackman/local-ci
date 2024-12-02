@@ -106,11 +106,16 @@ impl DatabaseEntry {
     pub fn stderr_path(&self) -> PathBuf {
         self.base_path.join("stderr.txt")
     }
+
+    pub fn artifacts_dir(&self) -> PathBuf {
+        self.base_path.join("artifacts")
+    }
 }
 
 // Output for an individual test job, stored into the database
 pub struct DatabaseOutput {
     base_dir: PathBuf,
+    artifacts_dir: PathBuf,
     base_dir_created: bool,
     stdout_opened: bool,
     stderr_opened: bool,
@@ -122,6 +127,7 @@ impl DatabaseOutput {
     pub fn new(base_dir: PathBuf, config_hash: ConfigHash) -> anyhow::Result<Self> {
         debug!("Creating database entry at {base_dir:?}");
         Ok(Self {
+            artifacts_dir: base_dir.join("artifacts").to_owned(),
             base_dir,
             base_dir_created: false,
             stdout_opened: false,
@@ -132,7 +138,7 @@ impl DatabaseOutput {
     }
 
     // Create and return base directory
-    fn get_base_dir(&mut self) -> Result<&Path> {
+    fn get_base_dir(&mut self) -> anyhow::Result<&Path> {
         if !self.base_dir_created {
             // To avoid confusion from partially-overwritten entries, delete the old one if it exists.
             if self.base_dir.exists() {
@@ -178,6 +184,11 @@ impl TestJobOutput for DatabaseOutput {
             self.get_base_dir()?.join("result.json"),
             serde_json::to_vec(&entry).expect("failed to serialize TestStatus"),
         )?)
+    }
+
+    fn artifacts_dir(&mut self) -> anyhow::Result<&Path> {
+        create_dir_all(&self.artifacts_dir)?;
+        Ok(&self.artifacts_dir)
     }
 }
 
