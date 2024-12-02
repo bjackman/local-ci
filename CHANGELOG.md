@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/bjackman/limmat/compare/v0.2.2...v0.2.3) - 2024-12-02
+
+### Fixed
+
+- Don't panic
+- Note in --help that "get" is experimental
+
+### Other
+
+- *(dev)* Add warning about locking
+- *(dev)* Notes on config repos
+- *(dev)* Bug notes
+- Fix new Clippy lints
+- *(dev)* Notes on flock
+- Remove timestamp argument from commit funcs
+- Pull out TestJob::set_env
+- Don't print noise when running 0 dep tests
+- *(dev)* Notes
+- Clarify `limmat test` intention
+- I accidentally a word
+
 ## [0.2.2](https://github.com/bjackman/limmat/compare/v0.2.1...v0.2.2) - 2024-11-25
 
 ### Added
