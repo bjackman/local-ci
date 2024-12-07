@@ -28,8 +28,6 @@ pub struct Dag<G: GraphNode> {
     id_to_idx: HashMap<G::I, usize>,
     // edges[i] contains the destinations of the edges originating from node i.
     edges: Vec<Vec<usize>>,
-    // indexes of nodes that aren't anyones child.
-    root_idxs: HashSet<usize>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -62,7 +60,6 @@ impl<G: GraphNode> Dag<G> {
             nodes: Vec::new(),
             id_to_idx: HashMap::new(),
             edges: Vec::new(),
-            root_idxs: HashSet::new(),
         }
     }
 
@@ -72,7 +69,7 @@ impl<G: GraphNode> Dag<G> {
         // We eventually wanna have a vector and just index it by an integer, so
         // start by mapping the arbitrary "node IDs" to vec indexes.
         // At this point we also reject duplicates (this is why we don't just
-        // wanna use `ollect`).
+        // wanna use `collect`).
         let mut id_to_idx = HashMap::new();
         for (idx, node) in nodes.iter().enumerate() {
             let id = node.id();
@@ -84,11 +81,8 @@ impl<G: GraphNode> Dag<G> {
         }
 
         // Now build the adjacency list.
-        let mut edges = Vec::new();
+        let mut edges = vec![Vec::new(); nodes.len()];
         for (idx, node) in nodes.iter().enumerate() {
-            if idx >= edges.len() {
-                edges.resize(idx + 1, Vec::new())
-            }
             for child_id in node.child_ids() {
                 let child_idx =
                     id_to_idx
@@ -101,62 +95,20 @@ impl<G: GraphNode> Dag<G> {
             }
         }
 
-        // Now we validate the DAG (no cycles) and find root nodes.
-        // Root nodes are those with no edges pointing to them.
-        let mut root_idxs: HashSet<usize> = (0..edges.len()).collect();
-        // This set is just used to avoid duplicating work.
-        let mut visited: HashSet<usize> = HashSet::new();
-        // This one actually detects cycles.
-        let mut visited_stack: HashSet<usize> = HashSet::new();
-        // This is a bit annoying in Rust because you cannot capture
-        // environments into a named function but you cannot recurse into a
-        // closure, so we just have to pass everything through args explicitly.
-        // Returns the index of a node which was found to be part of a cycle
-        // (in that case root_idxs won't be valid and we must bail).
-        fn recurse(
-            visited: &mut HashSet<usize>,
-            visited_stack: &mut HashSet<usize>,
-            start_idx: usize,
-            edges: &Vec<Vec<usize>>,
-            // Nodes will be removed from here if they are found to be another
-            // node's child.
-            root_idxs: &mut HashSet<usize>,
-        ) -> Option<usize> {
-            if visited_stack.contains(&start_idx) {
-                return Some(start_idx);
-            }
-            if visited.contains(&start_idx) {
-                // Already explored from this node and found no cycles.
-                return None;
-            }
-            visited.insert(start_idx);
-            visited_stack.insert(start_idx);
-            for child in &edges[start_idx] {
-                root_idxs.remove(child);
-                if let Some(i) = recurse(visited, visited_stack, *child, edges, root_idxs) {
-                    return Some(i);
-                }
-            }
-            visited_stack.remove(&start_idx);
-            None
-        }
-        for i in 0..edges.len() {
-            if let Some(node_in_cycle) =
-                recurse(&mut visited, &mut visited_stack, i, &edges, &mut root_idxs)
-            {
-                return Err(DagError::Cycle(nodes[node_in_cycle].id().borrow().clone()));
-            }
-        }
-
-        Ok(Self {
+        let dag = Self {
             nodes,
             edges,
             id_to_idx,
-            root_idxs: root_idxs.into_iter().collect(),
-        })
+        };
+        match dag.bottom_up().check_cycles() {
+            Some(node_in_cycle) => Err(DagError::Cycle(
+                dag.nodes[node_in_cycle].id().borrow().clone(),
+            )),
+            None => Ok(dag),
+        }
     }
 
-    // Return a new graph with a node added
+    // Return a new graph with a node added.
     pub fn with_node(mut self, node: G) -> Result<Self, DagError<G::I>> {
         let new_idx = self.nodes.len();
         self.id_to_idx.insert(node.id().borrow().clone(), new_idx);
@@ -174,21 +126,13 @@ impl<G: GraphNode> Dag<G> {
                 })
                 .collect::<Result<Vec<_>, DagError<G::I>>>()?,
         );
-        for child_id in node.child_ids() {
-            self.root_idxs.remove(&self.id_to_idx[child_id.borrow()]);
-        }
-        self.root_idxs.insert(new_idx);
         self.nodes.push(node);
         Ok(self)
     }
 
     // Iterate over nodes, visiting children before their parents.
-    pub fn bottom_up(&self) -> BottomUp<'_, G> {
-        BottomUp {
-            dag: self,
-            visit_stack: Vec::new(),
-            unvisited_roots: self.root_idxs.iter().copied().collect(),
-        }
+    pub fn bottom_up(&self) -> TopologicalSort<'_, G> {
+        TopologicalSort::new(&self, (0..self.nodes.len()).collect())
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = &G> + Clone {
@@ -202,69 +146,101 @@ impl<G: GraphNode> Dag<G> {
 
     // Iterate all the descendants of the relevant node, visiting parents before
     // their children.
-    pub fn top_down_from(&self, id: &G::I) -> Option<TopDown<G>> {
-        Some(TopDown {
-            dag: self,
-            visit_stack: Vec::new(),
-            unvisited_roots: vec![*self.id_to_idx.get(id.borrow())?],
-        })
+    pub fn top_down_from(&self, id: &G::I) -> Option<impl Iterator<Item = &G>> {
+        // Mindlessly recycle `TopologicalSort`, just reverse it and BAM!
+        // The back-and-forth of iterators is super awkward but necessary,
+        // because we need something with `DoubleEndedIterator` trait (i.e. Vec::<_>).
+        // Maybe there's a better way.
+        Some(
+            TopologicalSort::new(&self, vec![*self.id_to_idx.get(id.borrow())?])
+                .into_iter()
+                .collect::<Vec<&G>>()
+                .into_iter()
+                .rev(),
+        )
     }
 }
 
-#[derive(Clone)]
-pub struct BottomUp<'a, G: GraphNode> {
-    dag: &'a Dag<G>,
-    visit_stack: Vec<usize>,
-    unvisited_roots: Vec<usize>,
+// Possible states of a node during DFS.
+#[derive(Clone, PartialEq, Eq)]
+enum NodeState {
+    New,    // Initial state of every node.
+    Opened, // Node visited (pushed to the stack) but not yet closed.
+    Closed, // Node popped from the stack, all descendants visited.
 }
 
-impl<'a, G: GraphNode> Iterator for BottomUp<'a, G> {
+// Struct that iterates over the nodes reachable by a set of given sources
+// in topological order (https://en.wikipedia.org/wiki/Topological_sorting),
+// that is, every node comes _after_ all its children (yes, techinically
+// this is reverse toposort, but here it kinda makes sense to call it that
+// since edges are meant to represent dependencies).
+//
+// If cycles are present, `next()` will find one eventually and from then
+// on will return `None`.
+#[derive(Clone)]
+pub struct TopologicalSort<'a, G: GraphNode> {
+    dag: &'a Dag<G>,
+    dfs_stack: Vec<usize>,
+    node_state: Vec<NodeState>,
+    node_in_cycle: Option<usize>, // Populated when a cycle is detected.
+}
+
+impl<'a, G: GraphNode> TopologicalSort<'a, G> {
+    fn new(dag: &'a Dag<G>, sources: Vec<usize>) -> Self {
+        TopologicalSort {
+            dag,
+            dfs_stack: sources,
+            node_state: vec![NodeState::New; dag.nodes.len()],
+            node_in_cycle: None,
+        }
+    }
+
+    fn check_cycles(mut self) -> Option<usize> {
+        while self.next().is_some() {}
+        self.node_in_cycle
+    }
+}
+
+impl<'a, G: GraphNode> Iterator for TopologicalSort<'a, G> {
     type Item = &'a G;
 
-    fn next(&mut self) -> Option<&'a G> {
-        // I found the basic non-recursive DFS post-order algorithm here:
-        // https://codingots.medium.com/tree-traversal-without-recursion-221cbea6d004
-        // This is a translation of that, where "s1" is temp_stack and s2 is
-        // self.visit_stack. In that version there is only one root node but
-        // here we have several.
-        // First phase is to build up the stack of nodes to visit using
-        // temp_stack as an intermediate.
-        if self.visit_stack.is_empty() {
-            let mut temp_stack = vec![self.unvisited_roots.pop()?];
-            while let Some(cur_idx) = temp_stack.pop() {
-                self.visit_stack.push(cur_idx);
-                for child_idx in &self.dag.edges[cur_idx] {
-                    temp_stack.push(*child_idx);
+    // This is the iterative version of the DFS-based toposort implementation
+    // (https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search).
+    // Basically: do a normal DFS starting from the sources, and a node is
+    // appended to the toposort as soon as it is closed.
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(v) = self.dfs_stack.pop() {
+            match self.node_state[v] {
+                NodeState::New => {
+                    self.node_state[v] = NodeState::Opened;
+                    self.dfs_stack.push(v); // Don't actually pop yet.
+                                            // If any child of v is `Opened`, we fonud a cycle!
+                                            // This includes the case of a self-loop at v.
+                    if self.dag.edges[v]
+                        .iter()
+                        .any(|&u| self.node_state[u] == NodeState::Opened)
+                    {
+                        self.node_in_cycle = Some(v);
+                        // Some cleanup + subsequent calls will return `None`.
+                        self.dfs_stack.clear();
+                        return None;
+                    }
+                    self.dfs_stack.extend(
+                        self.dag.edges[v]
+                            .iter()
+                            .copied()
+                            .filter(|&u| self.node_state[u] == NodeState::New),
+                    );
                 }
+                NodeState::Opened => {
+                    self.node_state[v] = NodeState::Closed;
+                    return Some(&self.dag.nodes[v]);
+                }
+                NodeState::Closed => {}
             }
         }
-        // Now we just cruise down the to_visit stack drinking a large bottle of
-        // cranberry juice listening to Fleetwood Mac.
-        Some(&self.dag.nodes[self.visit_stack.pop().unwrap()])
-    }
-}
 
-#[derive(Clone)]
-pub struct TopDown<'a, G: GraphNode> {
-    dag: &'a Dag<G>,
-    visit_stack: Vec<usize>,
-    // Note these "roots" don't have to be roots in the overall DAG, they are
-    // only roots of the top-down traversals we're doing.
-    unvisited_roots: Vec<usize>,
-}
-
-impl<'a, G: GraphNode> Iterator for TopDown<'a, G> {
-    type Item = &'a G;
-
-    fn next(&mut self) -> Option<&'a G> {
-        if self.visit_stack.is_empty() {
-            self.visit_stack.push(self.unvisited_roots.pop()?)
-        }
-        let cur_idx = self.visit_stack.pop().unwrap();
-        for child_idx in &self.dag.edges[cur_idx] {
-            self.visit_stack.push(*child_idx);
-        }
-        Some(&self.dag.nodes[cur_idx])
+        None
     }
 }
 
@@ -312,9 +288,9 @@ mod tests {
     #[test_case(nodes([vec![1], vec![2, 3], vec![], vec![],
                        vec![5], vec![6, 7], vec![], vec![]]), None; "trees")]
     #[test_case(nodes([vec![0]]), Some(DagError::Cycle(0)); "self-link")]
-    // Note we don't actually care that the Cycle is reported on node 0, but
+    // Note we don't actually care that the Cycle is reported on node 2, but
     // luckily that's stable behaviour so it's just easy to assert it that way.
-    #[test_case(nodes([vec![1], vec![2], vec![3], vec![0]]), Some(DagError::Cycle(0)); "a loop")]
+    #[test_case(nodes([vec![1], vec![2], vec![3], vec![0]]), Some(DagError::Cycle(2)); "a loop")]
     #[test_case(nodes([vec![1]]), Some(DagError::NoSuchChild{parent: 0, child: 1}); "no child")]
     fn test_graph_validity(edges: Vec<TestGraphNode>, want_err: Option<DagError<usize>>) {
         assert_eq!(Dag::new(edges).err(), want_err);
@@ -325,7 +301,7 @@ mod tests {
     #[test_case(nodes([vec![1], vec![2, 3], vec![], vec![]]); "tree")]
     #[test_case(nodes([vec![1], vec![2, 3], vec![], vec![],
                        vec![5], vec![6, 7], vec![], vec![]]); "trees")]
-    #[test_case(nodes([vec![1, 2], vec![3], vec![3], vec![]]); "fail")]
+    #[test_case(nodes([vec![1, 2], vec![3], vec![3], vec![]]); "diamond")]
     fn test_bottom_up(edges: Vec<TestGraphNode>) {
         let all_nodes: HashSet<usize, RandomState> = HashSet::from_iter(0..edges.len());
         let dag = Dag::new(edges).unwrap();
@@ -338,17 +314,11 @@ mod tests {
             HashSet::from_iter(order.clone().map(|node| node.id)),
             "Not all nodes visited"
         );
-        // BUG: This assertion fails for dag::tests::test_bottom_up::fail:
-        //      assertion `left == right` failed: Some nodes have been visited more than once
-        //      left: 4
-        //      right: 5
-        // TODO: Uncomment once bug is fixed.
-        //
-        // assert_eq!(
-        //     dag.nodes.len(),
-        //     order.clone().count(),
-        //     "Some nodes have been visited more than once"
-        // );
+        assert_eq!(
+            dag.nodes.len(),
+            order.clone().count(),
+            "Some nodes have been visited more than once"
+        );
         let mut seen: HashSet<usize> = HashSet::new();
         for node in order {
             for child_id in node.child_ids() {
@@ -368,23 +338,17 @@ mod tests {
     // changes, than have a clever (a.k.a buggy) test that tries to really just
     // assert what mattters.
     #[test_case(nodes([vec![1], vec![2, 3], vec![], vec![]]),
-                0, vec![0, 1, 3, 2]; "tree")]
+                0, vec![0, 1, 2, 3]; "tree")]
     #[test_case(nodes([vec![1], vec![2, 3], vec![], vec![]]),
-                1, vec![1, 3, 2]; "tree non root")]
+                1, vec![1, 2, 3]; "tree non root")]
     #[test_case(nodes([vec![1], vec![2, 3], vec![], vec![],
                        vec![5], vec![6, 7], vec![], vec![]]),
-                0, vec![0, 1, 3, 2]; "trees 1")]
+                0, vec![0, 1, 2, 3]; "trees 1")]
     #[test_case(nodes([vec![1], vec![2, 3], vec![], vec![],
                        vec![5], vec![6, 7], vec![], vec![]]),
-                4, vec![4, 5, 7, 6]; "trees 2")]
-    // BUG: This test fails:
-    //      assertion `left == right` failed
-    //      left: [0, 2, 3, 4, 1, 4]
-    //      right: [0, 2, 3, 1, 4]
-    // TODO: Uncomment once bug is fixed.
-    //
-    // #[test_case(nodes([vec![1, 2], vec![4], vec![3], vec![4], vec![]]),
-    //             0, vec![0, 2, 3, 1, 4]; "fail")]
+                4, vec![4, 5, 6, 7]; "trees 2")]
+    #[test_case(nodes([vec![1, 2], vec![4], vec![3], vec![4], vec![]]),
+                0, vec![0, 1, 2, 3, 4]; "asymmetric diamond")]
     fn test_top_down(edges: Vec<TestGraphNode>, from: usize, want_order: Vec<usize>) {
         let dag = Dag::new(edges).unwrap();
         let order = dag.top_down_from(&from).unwrap();
