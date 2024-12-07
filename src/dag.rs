@@ -9,25 +9,23 @@ use std::{
 #[allow(unused_imports)]
 use log::debug;
 
-// TODO: It's annoying that users of this have to explicitly specify the ID type
-// every time. It feels like we want that to be an associated type of the trait
-// implementation. I tried that before and it didn't work, but this code was
-// much less flexible back then, so could still be worh exploring.
-pub trait GraphNode<I: Hash + Eq + Clone> {
+pub trait GraphNode {
+    type I: Hash + Eq + Clone;
+
     // Identifier for a node, unique among nodes in the set under consideration.
-    fn id(&self) -> impl Borrow<I>;
+    fn id(&self) -> impl Borrow<Self::I>;
     // IDs of nodes that have an edge from this node to that node.
-    fn child_ids(&self) -> Vec<impl Borrow<I>>;
+    fn child_ids(&self) -> Vec<impl Borrow<Self::I>>;
 }
 
 // Ajacency-list for a directed acyclic "graph" (dunno maybe incorrect
 // terminology, it doesn't make any promises about connectedness so it might be
 // zero or several actual "graphs"), where nodes are identified with a usize.
 #[derive(Debug)]
-pub struct Dag<I: Hash + Eq + Clone + Debug, G: GraphNode<I>> {
+pub struct Dag<G: GraphNode> {
     nodes: Vec<G>,
     // maps ids that nodes know about themselves to their index in `nodes`.
-    id_to_idx: HashMap<I, usize>,
+    id_to_idx: HashMap<G::I, usize>,
     // edges[i] contains the destinations of the edges originating from node i.
     edges: Vec<Vec<usize>>,
     // indexes of nodes that aren't anyones child.
@@ -58,7 +56,7 @@ impl<I: Debug> Display for DagError<I> {
 
 impl<I: Debug> Error for DagError<I> {}
 
-impl<I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Dag<I, G> {
+impl<G: GraphNode> Dag<G> {
     pub fn empty() -> Self {
         Self {
             nodes: Vec::new(),
@@ -68,9 +66,7 @@ impl<I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Dag<I, G> {
         }
     }
 
-    pub fn new(nodes: impl IntoIterator<Item = G>) -> Result<Self, DagError<I>>
-    where
-        G: GraphNode<I>,
+    pub fn new(nodes: impl IntoIterator<Item = G>) -> Result<Self, DagError<G::I>>
     {
         let nodes: Vec<G> = nodes.into_iter().collect();
 
@@ -162,7 +158,7 @@ impl<I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Dag<I, G> {
     }
 
     // Return a new graph with a node added
-    pub fn with_node(mut self, node: G) -> Result<Self, DagError<I>> {
+    pub fn with_node(mut self, node: G) -> Result<Self, DagError<G::I>> {
         let new_idx = self.nodes.len();
         self.id_to_idx.insert(node.id().borrow().clone(), new_idx);
         self.edges.push(
@@ -177,7 +173,7 @@ impl<I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Dag<I, G> {
                         })
                         .copied()
                 })
-                .collect::<Result<Vec<_>, DagError<I>>>()?,
+                .collect::<Result<Vec<_>, DagError<G::I>>>()?,
         );
         for child_id in node.child_ids() {
             self.root_idxs.remove(&self.id_to_idx[child_id.borrow()]);
@@ -188,7 +184,7 @@ impl<I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Dag<I, G> {
     }
 
     // Iterate over nodes, visiting children before their parents.
-    pub fn bottom_up(&self) -> BottomUp<'_, I, G> {
+    pub fn bottom_up(&self) -> BottomUp<'_, G> {
         BottomUp {
             dag: self,
             visit_stack: Vec::new(),
@@ -200,14 +196,14 @@ impl<I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Dag<I, G> {
         self.nodes.iter()
     }
 
-    pub fn node(&self, id: &I) -> Option<&G> {
+    pub fn node(&self, id: &G::I) -> Option<&G> {
         // TODO this is dumb lol get rid of id_to_idx
         Some(&self.nodes[*self.id_to_idx.get(id.borrow())?])
     }
 
     // Iterate all the descendants of the relevant node, visiting parents before
     // their children.
-    pub fn top_down_from(&self, id: &I) -> Option<TopDown<I, G>> {
+    pub fn top_down_from(&self, id: &G::I) -> Option<TopDown<G>> {
         Some(TopDown {
             dag: self,
             visit_stack: Vec::new(),
@@ -217,13 +213,13 @@ impl<I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Dag<I, G> {
 }
 
 #[derive(Clone)]
-pub struct BottomUp<'a, I: Hash + Eq + Clone + Debug, G: GraphNode<I>> {
-    dag: &'a Dag<I, G>,
+pub struct BottomUp<'a, G: GraphNode> {
+    dag: &'a Dag<G>,
     visit_stack: Vec<usize>,
     unvisited_roots: Vec<usize>,
 }
 
-impl<'a, I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Iterator for BottomUp<'a, I, G> {
+impl<'a, G: GraphNode> Iterator for BottomUp<'a, G> {
     type Item = &'a G;
 
     fn next(&mut self) -> Option<&'a G> {
@@ -250,15 +246,15 @@ impl<'a, I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Iterator for BottomUp<'a
 }
 
 #[derive(Clone)]
-pub struct TopDown<'a, I: Hash + Eq + Clone + Debug, G: GraphNode<I>> {
-    dag: &'a Dag<I, G>,
+pub struct TopDown<'a, G: GraphNode> {
+    dag: &'a Dag<G>,
     visit_stack: Vec<usize>,
     // Note these "roots" don't have to be roots in the overall DAG, they are
     // only roots of the top-down traversals we're doing.
     unvisited_roots: Vec<usize>,
 }
 
-impl<'a, I: Hash + Eq + Clone + Debug, G: GraphNode<I>> Iterator for TopDown<'a, I, G> {
+impl<'a, G: GraphNode> Iterator for TopDown<'a, G> {
     type Item = &'a G;
 
     fn next(&mut self) -> Option<&'a G> {
@@ -291,7 +287,9 @@ mod tests {
         child_ids: Vec<usize>,
     }
 
-    impl GraphNode<usize> for TestGraphNode {
+    impl GraphNode for TestGraphNode {
+        type I = usize;
+
         fn id(&self) -> impl Borrow<usize> {
             self.id
         }

@@ -101,7 +101,9 @@ fn default_requires_worktree() -> bool {
 }
 
 // This implementation is only valid for Tests among those registered for a single Manager.
-impl GraphNode<String> for Test {
+impl GraphNode for Test {
+    type I = String;
+
     fn id(&self) -> impl Borrow<String> {
         &self.name
     }
@@ -117,7 +119,7 @@ impl Test {
     // transitive dependencies (or this will panic).
     pub fn parse(
         &self,
-        other_tests: &Dag<TestName, Arc<test::Test>>,
+        other_tests: &Dag<Arc<test::Test>>,
     ) -> anyhow::Result<test::Test> {
         let mut seen_resources = HashSet::new();
         for resource in self.resources.as_ref().unwrap_or(&vec![]) {
@@ -216,7 +218,7 @@ impl Config {
     fn parse_tests(
         &self,
         resource_tokens: &ResourceTokens,
-    ) -> anyhow::Result<Dag<TestName, Arc<test::Test>>> {
+    ) -> anyhow::Result<Dag<Arc<test::Test>>> {
         let tests = Dag::new(self.tests.clone()).context("parsing test dependency graph")?;
         // This is beginning to be kinda cool, we can map between DAGs of
         // different types of objects.  It's still kinda awkward that users of
@@ -229,7 +231,7 @@ impl Config {
             .bottom_up()
             .try_fold(
                 Dag::empty(),
-                |parsed_dag, test_conf| -> anyhow::Result<Dag<TestName, Arc<test::Test>>> {
+                |parsed_dag, test_conf| -> anyhow::Result<Dag<Arc<test::Test>>> {
                     let new_node = Arc::new(test_conf.parse(&parsed_dag)?);
                     Ok(parsed_dag.with_node(new_node).unwrap())
                 },

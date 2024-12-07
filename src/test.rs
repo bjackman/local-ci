@@ -157,7 +157,9 @@ impl Debug for Test {
 // This implementation is only valid for Tests among those registered for a single Manager.
 // Hack: I couldn't be bothered to figure out how to make Dag work on Arc<Test>
 // as well as test. Soooooo I juts define the trait for Arc<Test>... seems fine so far lmao.
-impl GraphNode<TestName> for Arc<Test> {
+impl GraphNode for Arc<Test> {
+    type I = TestName;
+
     fn id(&self) -> impl Borrow<TestName> {
         &self.name
     }
@@ -167,7 +169,7 @@ impl GraphNode<TestName> for Arc<Test> {
     }
 }
 
-pub type TestDag = Dag<TestName, Arc<Test>>;
+pub type TestDag = Dag<Arc<Test>>;
 
 type JobEnv = Vec<(String, String)>;
 
@@ -858,7 +860,9 @@ impl TestCase {
     }
 }
 
-impl GraphNode<TestCaseId> for TestCase {
+impl GraphNode for TestCase {
+    type I = TestCaseId;
+
     fn id(&self) -> impl Borrow<TestCaseId> {
         self.id()
     }
