@@ -556,6 +556,8 @@ pub trait TestJobOutput {
     fn stdout(&mut self) -> anyhow::Result<Stdio>;
     // Panics if called more than once.
     fn set_result(&mut self, result: &TestResult) -> anyhow::Result<()>;
+    // Extant directory for the job to put artifacts into.
+    fn artifacts_dir(&mut self) -> &Path;
 }
 
 // This is not really a proper type, it doesn't really mean anything except as an implementation
@@ -694,8 +696,9 @@ impl<'a> TestJob {
         Ok(())
     }
 
-    fn set_env(&self, cmd: &mut Command, resources: &Resources<'a>) {
+    fn set_env(&self, cmd: &mut Command, resources: &Resources<'a>, artifacts_dir: &Path) {
         cmd.env("LIMMAT_COMMIT", &self.test_case.commit_hash);
+        cmd.env("LIMMAT_ARTIFACTS", &artifacts_dir);
         for (k, v) in self.base_env.iter() {
             cmd.env(k, v);
         }
@@ -728,7 +731,7 @@ impl<'a> TestJob {
         cmd.current_dir(current_dir)
             .stdout(output.stdout().context("no stdout handle available")?)
             .stderr(output.stderr().context("no stdout handle available")?);
-        self.set_env(&mut cmd, resources);
+        self.set_env(&mut cmd, resources, output.artifacts_dir());
         // It would be really confusing and annoying if we exited this function
         // without ensuring the child is dead. So we wrap it in this sketchy
         // drop guard thing.

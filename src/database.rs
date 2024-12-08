@@ -1,5 +1,5 @@
 use std::{
-    fs::{create_dir_all, File, OpenOptions},
+    fs::{create_dir, create_dir_all, File, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
     process::Stdio,
@@ -132,7 +132,8 @@ impl DatabaseEntry {
 
 // Output for an individual test job, stored into the database
 pub struct DatabaseOutput {
-    base_dir: PathBuf, // Must exist.
+    base_dir: PathBuf,      // Must exist.
+    artifacts_dir: PathBuf, // This too.
     stdout_opened: bool,
     stderr_opened: bool,
     status_written: bool,
@@ -142,12 +143,15 @@ pub struct DatabaseOutput {
 
 impl DatabaseOutput {
     pub fn new(
-        base_dir: PathBuf,
+        base_dir: PathBuf, // Must exist.
         config_hash: ConfigHash,
         json_flock: ExclusiveFlock,
     ) -> anyhow::Result<Self> {
         debug!("Creating database entry at {base_dir:?}");
+        let artifacts_dir = base_dir.join("artifacts").to_owned();
+        create_dir(&artifacts_dir).context("creating artifacts dir")?;
         Ok(Self {
+            artifacts_dir,
             base_dir,
             stdout_opened: false,
             stderr_opened: false,
@@ -183,6 +187,10 @@ impl TestJobOutput for DatabaseOutput {
             .file
             .write_all(&serde_json::to_vec(&entry).expect("failed to serialize TestStatus"))
             .context("writing JSON result")
+    }
+
+    fn artifacts_dir(&mut self) -> &Path {
+        &self.artifacts_dir
     }
 }
 

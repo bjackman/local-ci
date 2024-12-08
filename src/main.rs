@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::{stdout, Stdout};
-use std::path::{absolute, PathBuf};
+use std::path::{absolute, Path, PathBuf};
 use std::pin::pin;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -370,7 +370,9 @@ async fn ensure_job_success(
     Ok(())
 }
 
-struct OneshotOutput {}
+struct OneshotOutput {
+    artifacts_dir: PathBuf,
+}
 
 impl TestJobOutput for OneshotOutput {
     fn stdout(&mut self) -> anyhow::Result<Stdio> {
@@ -382,6 +384,9 @@ impl TestJobOutput for OneshotOutput {
     fn set_result(&mut self, result: &TestResult) -> anyhow::Result<()> {
         eprintln!("Job result: {result:?}");
         Ok(())
+    }
+    fn artifacts_dir(&mut self) -> &Path {
+        &self.artifacts_dir
     }
 }
 
@@ -525,9 +530,13 @@ async fn test(
     // Doesn't need a worktree, it's gonna do it live and direct in the main tree.
     needs_resources.remove(&ResourceKey::Worktree);
     let resources = env.config.resource_pools.get(needs_resources).await;
-    let result = job
-        .run_with(env.repo.path(), &resources, OneshotOutput {})
-        .await?;
+    let artifacts_dir = TempDir::with_prefix("limmat-artifacts-")?.into_path();
+    println!(
+        "Test artifacts will be stored under {}",
+        artifacts_dir.display()
+    );
+    let output = OneshotOutput { artifacts_dir };
+    let result = job.run_with(env.repo.path(), &resources, output).await?;
     eprintln!("Finished: {}", result);
     Ok(())
 }
