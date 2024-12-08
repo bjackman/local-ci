@@ -18,9 +18,8 @@ pub trait GraphNode {
     fn child_ids(&self) -> Vec<impl Borrow<Self::I>>;
 }
 
-// Ajacency-list for a directed acyclic "graph" (dunno maybe incorrect
-// terminology, it doesn't make any promises about connectedness so it might be
-// zero or several actual "graphs"), where nodes are identified with a usize.
+// Ajacency-list for a directed acyclic graph, where nodes are identified
+// with a usize.
 #[derive(Debug)]
 pub struct Dag<G: GraphNode> {
     nodes: Vec<G>,
