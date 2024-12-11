@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/bjackman/limmat/compare/v0.2.2...v0.2.3) - 2024-12-11
+
+### Added
+
+- Make some args global
+- Implement initial database locking
+
+### Fixed
+
+- Implement read locking too
+- Implement proper database entry locking
+- Recover correctly from broken database results
+- Don't panic
+- Note in --help that "get" is experimental
+
+### Other
+
+- Log config hashes
+- Bring back warning about locking
+- Add comment on garbage flocking
+- Hacks to make race failures easier to debug
+- Add a log for test status changes
+- Clean up database lookup logging
+- Fix clippy
+- cargo fmt
+- Remove unnecessary remark
+- Fix bugs in dag module
+- Add failing test cases for dag::tests
+- Make I an associated type of trait GraphNode
+- Remove warning about race conditions
+- Add test for locking database entries
+- More detailed errors
+- Clean up TestJob notifying etc a bit
+- checkpoint
+- checkpoint
+- Make run_inner return TestOutcome
+- Make TestOutcome be a Result
+- Split up TestStatus and TestOutcome
+- Move output creation into TestJob::run
+- *(dev)* Add warning about locking
+- *(dev)* Notes on config repos
+- *(dev)* Bug notes
+- Fix new Clippy lints
+- *(dev)* Notes on flock
+- Remove timestamp argument from commit funcs
+- Pull out TestJob::set_env
+- Don't print noise when running 0 dep tests
+- *(dev)* Notes
+- Clarify `limmat test` intention
+- I accidentally a word
+
 ## [0.2.2](https://github.com/bjackman/limmat/compare/v0.2.1...v0.2.2) - 2024-11-25
 
 ### Added
